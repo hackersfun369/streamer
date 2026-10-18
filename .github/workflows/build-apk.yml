@@ -144,3 +144,16 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: mobile/android/app/build/outputs/apk/release/streamdrop.apk
+          generate_release_notes: true
+          body: |
+            **Download `streamdrop.apk` below and open it on your phone.**
+
+            - Needs Android 7.0 or newer (minSdk 24).
+            - Your phone will warn you about installing an unknown app — allow it for whatever
+              app you downloaded with (Chrome, Files), then open the APK again.
+            - The app needs no account, no server and no network identity: two phones exchange a
+              connection code, and the file travels straight between them.
+
+            Unless the `ANDROID_KEYSTORE_*` repository secrets are set, this APK is signed with a
+            throwaway debug key. It installs fine, but a future properly-signed build cannot
+            upgrade over it — you would uninstall this one first.
