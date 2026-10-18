@@ -26,7 +26,7 @@ flowchart LR
 
     subgraph HC["🟨 THE HUMAN CHANNEL — a chat, a screen, a piece of paper"]
         direction TB
-        HUM["the connection code out,<br/>the reply code back,<br/>and the Transfer Key<br/>on a DIFFERENT channel"]
+        HUM["the connection code out,<br/>the reply code back —<br/>one scan or paste each way"]
     end
 
     subgraph RD["🟦 RECEIVER DEVICE — holds the key, receives only ciphertext"]
@@ -41,9 +41,9 @@ flowchart LR
         STUN["public STUN<br/>answers one question only:<br/>what is my address?"]
     end
 
-    SP -->|"① connection code — QR · paste · gallery import · NO key material"| HUM
+    SP -->|"① connection code — QR · link · paste · screenshot<br/>carries the key by default, so no separate step"| HUM
     HUM -->|"② reply code back the same way"| SP
-    HUM -->|"③ Transfer Key — over a different channel, to the receiver"| RC
+    SP -.->|"OPT-IN: with “keep the key out of the code”,<br/>the key travels on a second channel instead"| RC
     SP <-->|"after the introduction: the encrypted data channel<br/>64 KiB frames · DTLS outside, AES-256-GCM inside"| RP
     SP -.->|"address discovery only"| STUN
     RP -.->|"address discovery only"| STUN
@@ -53,7 +53,7 @@ flowchart LR
 
 ---
 
-## 2. The handshake — what each artifact is and why the key is separate
+## 2. The handshake — two scans, and (by default) nothing to type
 
 ![Handshake sequence](assets/v5-handshake.png)
 
@@ -69,16 +69,16 @@ sequenceDiagram
 
     S->>N: ask for my public address
     N-->>S: srflx candidates
-    Note over S: build offer, gather ICE to completion,<br/>wrap it with shareId + codeFp + window + cap
-    S->>H: ① connection code — 793 chars, ~900 with a link
-    H->>R: the human carries it
+    Note over S: build offer, gather ICE to completion,<br/>wrap it with shareId + codeFp + window + cap + key
+    S->>H: ① connection code — ~705 chars, ~815 with a link
+    H->>R: the human carries it — scan, paste, or a screenshot
     Note over R: parse the code,<br/>check hkdfCodeFp ID === codeFp
+    Note over R: the key came with the code, so the file<br/>can already be opened — no typing
     R->>R: build the SDP answer
     R->>H: ② reply code
-    H->>S: the human carries it back
+    H->>S: the human carries it back — scan or paste
     Note over S: applyAnswer checks the codeFp matches
     S<<->>R: ICE succeeds — data channel opens
-    H->>R: ③ Transfer Key — different channel
     R->>R: unseal manifest, verify Ed25519, check receiverAuth
     R->>S: begin — this counts as one download
     S-->>R: hello — header, geometry, window, quota
@@ -92,10 +92,13 @@ sequenceDiagram
 
 </details>
 
-**Why the key is not in the code.** A man-in-the-middle who sits in the chat can substitute their
-own code — but the signing key is derived from the Transfer Key travelling on a different channel,
-so a forged manifest fails verification. The "receive link" button merges the two on purpose and
-says plainly that anyone holding that URL can open the file.
+**Where the key is, and what it costs.** By default the key rides inside the connection code, which is
+what removes the third exchange and every typing step: whoever holds the code can fetch the file until
+the sender presses Stop, which is exactly how a QR-share is normally understood. The sender can switch
+that off under *Options → keep the key out of the code*, and then the key travels on a second channel and
+the receiver types it in — the two-channel property that protects against someone who merely *sees* the
+code. Either way the bytes are AES-256-GCM sealed per block, the manifest is Ed25519-signed with a key
+derived from the Transfer Key, and the file on disk is never re-written in the clear.
 
 ---
 
@@ -107,10 +110,10 @@ says plainly that anyone holding that URL can open the file.
 
 ```mermaid
 flowchart TD
-    A["pick a file · window 1–72 h · optional cap<br/>optional split-key · optional backup passphrase"] --> B["createSender<br/>7-char ID + 32-byte Transfer Key<br/>HKDF → fek, manifestKey, signPriv, receiverAuth"]
+    A["pick a file (drop it, or paste it)<br/>Options: window 1 h–7 d · cap unlimited/1/3/10<br/>note for the receiver · split key · backup passphrase<br/>keep the key out of the code"] --> B["createSender<br/>7-char ID + 32-byte Transfer Key<br/>HKDF → fek, manifestKey, signPriv, receiverAuth"]
     B --> C["buildHeader<br/>seal manifest + Ed25519 sign it"]
     C --> D["geometryFor — no copy of the file is made<br/>blockLens and offsets only"]
-    D --> E["live session starts<br/>mint connection code 1"]
+    D --> E["live session starts<br/>mint connection code 1 (with the key in it, by default)<br/>hold a screen wake lock so the source stays awake"]
     E --> F{"receiver sends a reply code?"}
     F -->|"yes, codeFp matches"| G["applyAnswer → ICE connects"]
     G --> H["data channel opens<br/>attach SenderAgent"]
@@ -122,7 +125,7 @@ flowchart TD
     F -->|"attempt failed"| L["mint a fresh code and say so"]
     L --> F
     E --> M{"Stop pressed ·<br/>window closed ·<br/>cap reached?"}
-    M -->|"yes"| N["close every peer connection<br/>nothing is left anywhere to revoke"]
+    M -->|"yes"| N["close every peer connection<br/>release the wake lock<br/>nothing is left anywhere to revoke"]
 ```
 
 </details>
@@ -137,21 +140,25 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    A["connection code in — paste · camera scan · import a screenshot"] --> B["parseInvite<br/>v=5, t=offer, sdp, shareId, codeFp"]
+    A["connection code in — camera scan · paste · import a screenshot · deep link"] --> B["parseInvite<br/>v=5, t=offer, sdp, shareId, codeFp, k | ka+kb"]
     B --> C{"hkdfCodeFp ID === codeFp?"}
     C -->|"no"| X["refuse — the code is damaged"]
-    C -->|"yes"| D["acceptInvite → answer, show the reply code<br/>copy it · show its QR · save the PNG"]
+    C -->|"yes"| D["acceptInvite → answer, show the reply code<br/>copy it · show its QR"]
     D --> E["ICE connects — or connectionState 'failed'<br/>and the UI says the network is blocking it"]
     E --> F["begin → hello<br/>header, geometry, window, quota"]
-    F --> G["enter the Transfer Key<br/>paste · scan · import the key QR"]
-    G --> H["unsealHeader + verify Ed25519 signature<br/>check receiverAuth"]
-    H -->|"fails"| Y["that key does not open this transfer"]
-    H -->|"ok"| I["download: one block at a time"]
-    I --> J["read offset+len → frames by offset<br/>30 s timeout, one retry"]
-    J --> K["decryptChunk with AAD sd-v1-chunk ID index<br/>GCM-verified before anything is written"]
-    K --> L["write to the file picker, or spill to a Blob past 512 MiB"]
-    L --> I
-    L --> M["end — done"]
+    F --> G{"did the code carry the key?"}
+    G -->|"yes — the default"| H["open the file with no typing at all"]
+    G -->|"no — sender kept it separate"| I["ask for the Transfer Key<br/>paste · scan · import the key QR"]
+    I --> H
+    H --> J["unsealHeader + verify Ed25519 signature<br/>check receiverAuth"]
+    J -->|"fails"| Y["that key does not open this transfer"]
+    J -->|"ok"| K["one tap: Save file"]
+    K --> L["download: one block at a time"]
+    L --> M["read offset+len → frames by offset<br/>30 s timeout, one retry"]
+    M --> N["decryptChunk with AAD sd-v1-chunk ID index<br/>GCM-verified before anything is written"]
+    N --> O["write to the file picker, or spill to a Blob past 512 MiB<br/>progress bar with speed and ETA"]
+    O --> L
+    O --> P["end — done, with the file verified byte for byte"]
 ```
 
 </details>
@@ -205,7 +212,7 @@ flowchart TD
         HDR --> B0 --> B1 --> BN
     end
 
-    TK["Transfer Key — 32 random bytes<br/>never leaves the sender's device<br/>never travels with the connection code"] --> K1["HKDF sd-v1-file → fek<br/>block encryption"]
+    TK["Transfer Key — 32 random bytes<br/>lives on the sender's device<br/>rides in the connection code by default,<br/>or on a second channel if the sender opts out"] --> K1["HKDF sd-v1-file → fek<br/>block encryption"]
     TK --> K2["HKDF sd-v1-manifest → manifestKey<br/>seals the manifest"]
     TK --> K3["HKDF sd-v1-sign → signPriv / signPub<br/>signs the sealed manifest"]
     TK --> K4["HKDF sd-v1-receiver → receiverAuth<br/>proves the key is the right one"]
@@ -259,7 +266,7 @@ stateDiagram-v2
 ```mermaid
 flowchart LR
     subgraph GH["🟪 GitHub Actions — no local toolchain, no device work"]
-        CI["ci.yml — push and pull requests<br/>typecheck → 19 tests → production build"]
+        CI["ci.yml — push and pull requests<br/>typecheck → 24 tests → production build<br/>+ a smoke test of the mobile helper scripts"]
         APK["build-apk.yml — manual or tag v*<br/>build assets → normalise Capacitor config<br/>cap add android · cap sync<br/>add the CAMERA permission<br/>gradle assembleRelease"]
         REL[("GitHub Releases<br/>APK attached on tags")]
     end

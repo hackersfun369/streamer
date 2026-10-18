@@ -1,20 +1,23 @@
 # StreamDrop
 
-Key-based, end-to-end-encrypted file transfer with **no server at all**. The sender picks a file
-and hands over a **connection code**; the receiver sends back a **reply code**; the two devices find
-each other and stream the bytes **straight from one to the other**. The file is never uploaded,
-never stored, and never proxied — there is nowhere for it to be stored, because there is no backend.
+Key-based, end-to-end-encrypted file transfer with **no server at all**. The sender picks a file and
+hands over one **connection code**; the receiver sends back one **reply code**; the two devices find
+each other and stream the bytes **straight from one to the other**. The key rides inside the code by
+default, so the receiver types nothing — two scans, and the file is there. The file is never
+uploaded, never stored, and never proxied — there is nowhere for it to be stored, because there is
+no backend.
 
 - **Nothing to deploy.** No Cloudflare, no Worker, no D1, no Durable Object, no account, no OAuth,
   no API key, no environment variables. The web app is static files; the APK needs nothing.
 - **Nothing is stored anywhere.** The sender's tab encrypts each 4 MiB block on demand (AES-256-GCM,
   sealed manifest signed with Ed25519) and hands it directly to the receiver over WebRTC.
-- **The key travels separately from the connection.** The code that introduces the two devices
-  contains no key material, so an intercepted code is useless. Getting the file still needs the
-  **Transfer Key**, which the UI tells you to send over a different channel.
+- **One code, and by default it carries the key.** The code that introduces the two devices includes
+  the Transfer Key, so the receiver never types anything and there is no third exchange. The UI
+  states the price in plain words: whoever gets the code can download until the sender presses Stop.
+  Prefer the stronger two-channel model? *Options → keep the key out of the code*, and an
+  intercepted code opens nothing until the key arrives separately.
 - **The code works three ways, in both directions:** QR to scan with the camera, QR **imported from
-  a screenshot in your gallery**, or plain text to paste. Keep the QR if you like; type or paste the
-  code if you don't.
+  a screenshot**, or plain text to paste. A reply can come back any of those ways too.
 - **Expiry, download caps and Stop are enforced by the sender's own device**, which is the only
   place the bytes exist. Stopping closes every connection at once; there is no remote copy to chase.
 - The trade, stated plainly and shown in the UI: **both people must be online at the same time**,
@@ -60,12 +63,17 @@ web app + mobile shell (no backend anywhere)
 
 ### What a user does
 
-1. **Sender:** pick a file, press *Start sharing*, then send the **connection code** to the receiver
-   (QR, paste, or a link).
-2. **Receiver:** paste/scan/import that code, then send the **reply code** back.
-3. **Sender:** paste/scan the reply → the devices are connected.
-4. **Sender:** send the **Transfer Key** over a *different* channel than the code.
-5. **Receiver:** paste/scan the key → the file streams block by block, verified as it arrives.
+1. **Sender:** pick a file, press *Create transfer*, show the **connection code** (QR on screen, or
+   send the code/link by chat).
+2. **Receiver:** scan it with the camera — or paste it, or import a screenshot — then show the
+   **reply code** back.
+3. **Sender:** scan or paste that reply → the devices connect directly.
+4. **Receiver:** press one **Save** button (the key already came with the code). The file streams
+   block by block and is verified as it arrives.
+
+*Extra caution is opt-in:* under Options, the sender can keep the key out of the code — then a fifth
+step appears, sending the key on a second channel, and the receiver types it in. Split-key, download
+caps, a receiver note and a passphrase-sealed key backup live there too.
 
 ### What each party stores
 
@@ -90,16 +98,20 @@ npm run logo         # re-render the icon
 - The **Transfer Key** is 32 random bytes generated in the sender's tab. HKDF derives every sub-key
   (block cipher, manifest seal, Ed25519 signing key, receiver proof). It never leaves the device
   except through you.
-- The **connection code** carries the offer, the share ID, its fingerprint and the public
-  window/cap/note — **no key material**. It is single-use, because one WebRTC offer admits exactly
-  one receiver; a fresh code is minted after each connection.
+- By **default the connection code carries the key** (`k`, or `ka`+`kb` for a split key) alongside
+  the offer, share ID, fingerprint and public window/cap/note. That makes the code a bearer token for
+  the live share, and the UI says so next to the QR. **Opt-in mode** (Options → keep the key out of
+  the code) removes all key material from the code, so an intercepted code is useless until the key
+  arrives on a second channel. Either way the code is single-use: one WebRTC offer admits exactly one
+  receiver, and a fresh code is minted after every connection.
 - The receiver verifies the **Ed25519 signature** over the sealed manifest and the `receiverAuth`
   binding before a single block is written, and every block is **GCM-verified** with AAD bound to
-  the share ID and the block index.
+  the share ID and the block index. A code with a damaged key fails these checks loudly instead of
+  decrypting garbage.
 - The bytes travel over **DTLS *and* GCM**: two independent layers, and no third party in the path.
-- Options for extra caution: **burn-after-read** (download caps), **split-key** (halves over two
-  channels), **key backup passphrase** (PBKDF2 ×250k + AES-GCM; the backup file is useless without
-  the passphrase).
+- Options for extra caution: **keep the key out of the code** (two-channel), **burn-after-read**
+  (download caps), **split-key** (halves over two channels), **key backup passphrase** (PBKDF2 ×250k
+  + AES-GCM; the backup file is useless without the passphrase).
 - Cheap talk deserves a caveat: peer-to-peer means the two devices see each other's IP addresses,
   and the public STUN server used for address discovery sees them too. It never sees any data. Set
   the ICE list to empty in `src/rtc.ts` if you want same-network-only transfers.

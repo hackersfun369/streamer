@@ -280,3 +280,42 @@ There is no backend left to delete a dependency from.
   `ReceiverAgent` over a channel that delivers frames **out of order**, every block GCM-decrypted
   with AAD bound to the share ID and index, then an 8 MiB byte-by-byte comparison. The WebRTC
   handshake itself (ICE/DTLS/SCTP) is the one thing not covered, because it needs two real browsers.
+
+---
+
+## 14. v6 UI — the key rides in the code (two scans, zero typing)
+The v5 flow was honest but heavy: code out, reply back, and then the receiver **typed the Transfer
+Key** — a third exchange on top of the two the no-server model already forces, and five cards of
+options on the Send screen. The redesign collapses the handshake to the network's own minimum:
+
+- **The key is now inside the connection code by default.** encodeInvite/parseInvite carry
+  optional k (single key) or ka+kb (split halves) alongside the SDP; a v5 code *without* a key
+  still parses, and an old build that receives a key-carrying code simply ignores the extra fields, so
+  the wire format is backward and forward compatible without a version bump. The key costs ~25 chars
+  (64 hex chars deflate well): measured 690 → **705 chars**, QR v18-22 at ECC M, ~3.4 px/module at
+  340 px — still easy to scan, verified with the real encoder before building the UI around it.
+- **The receiver types nothing.** eceive.ts auto-unlocks from the code's key and shows one Save
+  button; the separate-key path (Options → *keep the key out of the code*) still exists and still
+  asks for the key, because some people want the two-channel property. The sender's card states the
+  trade on the QR itself: whoever holds the code can download until Stop.
+- **The sender is one screen.** Pick a file (drag-and-drop included) → *Create transfer* → one QR
+  with Copy code/Copy link; everything else (window presets, download cap, receiver note, split key,
+  backup passphrase) moved under a single *Options* disclosure. Live stats (served, speed, ETA,
+  downloads) replace the fixed-card zoo, a **screen wake lock** keeps the phone from sleeping
+  mid-transfer, and pasting the reply works *anywhere on the page*, not just in the input.
+- **A real design system replaced the default stylesheet**: one accent gradient, glass cards on a
+  dark base, a 3-step indicator, progress bars, toasts, a key-viewer modal on the transfers list —
+  with prefers-reduced-motion honoured and AA contrast kept. Fixed on the way: an author
+  display:block on <video> was beating the UA [hidden] rule, leaving an empty black preview
+  on screen ([hidden]{display:none!important} now says it once, hard).
+- **Crypto still untouched.** src/crypto.ts is byte-identical; the vault rows, backups and
+  containers all keep working. Tests grew 19 → **24**, including two that pin the new contract:
+  derive a key set *only from what the code carried* and unseal a real header with it — and prove a
+  different transfer's key still fails.
+- **Verified in a real browser** (Chromium, two tabs = two devices): file pick → transfer created →
+  705-char code with the key inside → QR rendered → receiver tab consumed the deep link and produced
+  the reply → sender accepted it (both views screenshotted). Raw WebRTC itself cannot connect in
+  this environment — ICE gathers **zero candidates** even for a bare `RTCPeerConnection` pair with
+  no ICE servers at all — so the handshake stall was environmental, not a regression; the
+  ICE/DTLS/SCTP hop still needs two real devices, as in v5.
+

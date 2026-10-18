@@ -8,7 +8,7 @@
 import { describe, expect, it } from "vitest";
 import {
   CHUNK_SIZE, blockLenFor, buildHeader, chunkCountFor, createSender, decryptChunk, plainChunkLen,
-  receiverKeySet, unsealHeader, b64, unb64, type Manifest,
+  receiverKeySet, unsealHeader, b64, unb64, fromHex, toHex, type Manifest,
 } from "./crypto";
 import { CiphertextSource, geometryFor } from "./container";
 import { ReceiverAgent, SenderAgent, type BlockChannel, type Budget, type HelloFrame } from "./protocol";
@@ -225,6 +225,118 @@ describe("connection codes", () => {
     const parsed = await parseInvite(code);
     // The receiver recomputes this from the ID; a mismatch is what the app refuses to trust.
     expect(parsed.codeFp).not.toBe(META.codeFp);
+  });
+
+  /* The default flow in the UI: the key rides in the code, so nothing has to be typed at the other
+   * end. These pin both halves of that contract — the carrying, and the leaving-out. */
+
+  it("can carry the key itself, so the receiver types nothing", async () => {
+    const keyHex = "0123456789abcdef".repeat(4);
+    const withKey = await encodeInvite({ ...META, keyHex }, SDP);
+    const back = await parseInvite(withKey);
+    expect(back.k).toBe(keyHex);
+    expect(back.ka).toBeUndefined();
+
+    // The key must not cost so much space that the QR stops being easy to scan.
+    const without = await encodeInvite(META, SDP);
+    expect(withKey.length - without.length).toBeLessThan(60);
+    expect(withKey.length).toBeLessThan(900);
+  });
+
+  it("can carry a split key as two halves, and refuses a lone half", async () => {
+    const halfAHex = "aa".repeat(32);
+    const halfBHex = "bb".repeat(32);
+    const back = await parseInvite(await encodeInvite({ ...META, halfAHex, halfBHex }, SDP));
+    expect(back.ka).toBe(halfAHex);
+    expect(back.kb).toBe(halfBHex);
+    expect(back.k).toBeUndefined();
+
+    const craft = (extra: Record<string, string>): string => {
+      const json = JSON.stringify({ v: 5, t: "offer", ...META, sdp: SDP, ...extra });
+      const bytes = new TextEncoder().encode(json);
+      let bin = "";
+      for (const x of bytes) bin += String.fromCharCode(x);
+      return CODE_PLAIN + btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    };
+    await expect(parseInvite(craft({ ka: halfAHex }))).rejects.toThrow(/one key half/i);
+    await expect(parseInvite(craft({ k: "not-hex" }))).rejects.toThrow(/bad key/i);
+  });
+
+  it("keeps the key out of the code when the sender says so", async () => {
+    const back = await parseInvite(await encodeInvite(META, SDP));
+    expect(back.k).toBeUndefined();
+    expect(back.ka).toBeUndefined();
+    expect(back.kb).toBeUndefined();
+  });
+});
+
+/* ── the one-code handshake: everything a receiver needs, carried in one scan ── */
+
+describe("one-code handshake", () => {
+  const makeShare = async (split: boolean) => {
+    const set = await createSender({ split });
+    const manifest: Manifest = {
+      v: 1,
+      name: "contract.pdf",
+      mime: "application/pdf",
+      size: 4096,
+      chunkSize: CHUNK_SIZE,
+      chunkCount: 1,
+      createdAt: Date.now(),
+      expiresAt: Date.now() + 3600_000,
+      receiverAuth: set.receiverAuth,
+      mode: "direct",
+    };
+    const header = await buildHeader(set, manifest);
+    const code = await encodeInvite({
+      shareId: set.shareId,
+      codeFp: set.codeFp,
+      expiresAt: manifest.expiresAt,
+      maxDownloads: null,
+      publicLabel: null,
+      ...(set.halfA && set.halfB
+        ? { halfAHex: toHex(set.halfA), halfBHex: toHex(set.halfB) }
+        : { keyHex: toHex(set.transferKey) }),
+    }, SDP);
+    return { set, manifest, header, code };
+  };
+
+  it("lets the receiver open the file with nothing but the code in hand", async () => {
+    const share = await makeShare(false);
+    const parsed = await parseInvite(share.code);
+    expect(parsed.k).toBe(toHex(share.set.transferKey));
+
+    // Exactly what the receive screen does: derive the key set from what the code carried.
+    const keySet = await receiverKeySet(parsed.shareId, fromHex(parsed.k!));
+    expect(keySet.codeFp).toBe(share.set.codeFp);
+    expect(keySet.receiverAuth).toBe(share.set.receiverAuth);
+
+    const opened = await unsealHeader(share.header.bytes, {
+      manifestKey: keySet.manifestKey,
+      signPub: keySet.signPub,
+    });
+    expect(opened.name).toBe(share.manifest.name);
+    expect(opened.receiverAuth).toBe(share.set.receiverAuth);
+  });
+
+  it("does the same for a split key, and still refuses the wrong key", async () => {
+    const share = await makeShare(true);
+    const parsed = await parseInvite(share.code);
+    const keySet = await receiverKeySet(parsed.shareId, [fromHex(parsed.ka!), fromHex(parsed.kb!)]);
+
+    const opened = await unsealHeader(share.header.bytes, {
+      manifestKey: keySet.manifestKey,
+      signPub: keySet.signPub,
+    });
+    expect(opened.name).toBe(share.manifest.name);
+
+    // A different transfer's key must not open this header — the "wrong key" path stays closed.
+    const other = await makeShare(false);
+    const wrong = await receiverKeySet(share.set.shareId, other.set.transferKey);
+    await expect(unsealHeader(share.header.bytes, {
+      manifestKey: wrong.manifestKey,
+      signPub: wrong.signPub,
+    })).rejects.toThrow();
   });
 });
 

@@ -16,11 +16,11 @@
    ┌──────────────────────────────┐                ┌──────────────────────────────┐
    │ the file (plaintext, never   │                │                              │
    │ leaves except as GCM blocks) │                │                              │
-   │                              │   ① code (QR / paste / link / gallery image)   │
+   │                              │   ① code — QR / link / paste / screenshot      │
    │  RtcpPeerConnection ═════════╪════════════════╪══► RtcpPeerConnection        │
-   │        ▲                     │   ② reply (QR / paste / back the same way)     │
-   │        │ encrypted ranges    │◄───────────────┼──────── RtcpPeerConnection   │
-   │  SenderAgent ─ Ciphertext    │   ③ Transfer Key (a different channel)         │
+   │        ▲                     │     (carries the key by default)               │
+   │        │ encrypted ranges    │   ② reply (QR / paste / back the same way)     │
+   │  SenderAgent ─ Ciphertext    │◄───────────────┼──────── RtcpPeerConnection   │
    │  Source (read→encrypt→forget)│                │                              │
    └──────────────────────────────┘                └──────────────────────────────┘
               │                                                 │
@@ -31,9 +31,9 @@ Three things, in three places, for three jobs:
 
 | Thing | Where it lives | What it does |
 |---|---|---|
-| **Connection code** | shown by the sender, carried by a human | finds the two devices; single-use |
+| **Connection code** | shown by the sender, carried by a human | finds the two devices; single-use; **carries the key by default** |
 | **Reply code** | produced by the receiver, carried back | completes the introduction |
-| **Transfer Key** | shown by the sender on a *different* channel | the only thing that decrypts |
+| **Transfer Key** | derived by the sender, carried *inside the code* by default | the only thing that decrypts |
 
 Everything else is ciphertext moving over a data channel between two browsers.
 
@@ -49,15 +49,16 @@ Two devices that have never met cannot find each other without an intermediary �
 about networks, not a design choice. So the introduction is *carried* instead of *hosted*:
 
 1. The sender's browser gathers ICE candidates, builds an SDP offer, and packs it — with the
-   transfer's public metadata — into one compact string. It shows that string as a **QR code** and
-   as **copyable text**.
-2. The receiver takes that code — pasted, scanned with the camera, **imported from a screenshot in
-   the gallery**, or opened from a link — and their browser builds the SDP answer. Out comes a
-   **reply code**, the same three ways back (QR, text).
+   transfer's public metadata **and the key** — into one compact string. It shows that string as a
+   **QR code** and as **copyable text** (and as a link for chat).
+2. The receiver takes that code — **scanned with the camera**, pasted, imported from a screenshot,
+   or opened from a link — and their browser builds the SDP answer. Out comes a **reply code**, the
+   same ways back (QR, text).
 3. The sender pastes or scans the reply. ICE does the rest: the two browsers punch through their
    NATs and open an encrypted data channel.
-4. The **Transfer Key** arrives separately — pasted, scanned, or imported. Only then does the
-   ciphertext mean anything.
+4. The receiver already holds the key — it came with the code — so the file opens with no third
+   exchange and nothing typed. With *Options → keep the key out of the code*, the key goes back to
+   travelling on a second channel and this step asks for it instead.
 
 ### One code admits one receiver
 
@@ -66,15 +67,22 @@ connection is established the session mints a **fresh code** immediately, and th
 happens after a failed attempt. The UI therefore talks about "the current code for the next
 receiver" rather than a stable address.
 
-### The key stays out of the code
+### Where the key is — and what each choice costs
 
-The code carries the offer, the share ID, the ID's fingerprint, and the public window/cap/note. It
-never carries the key. That is the whole security model in one sentence: **the code can be
-intercepted and the file still stays shut.**
+By default the code carries the key (`k`, or `ka` + `kb` for a split key), which is what reduces the
+handshake to two scans and removes every typing step. The cost is stated in the UI, not hidden:
+**whoever holds the code can fetch the file until the sender presses Stop** — the normal
+understanding of a QR share, and the reason Stop sits right next to the code.
 
-There is also an explicit "receive link" button that puts the code *and* the key in a single URL.
-It exists because sometimes one channel is all you have, and the UI says plainly what it costs:
-anyone who sees that link can open the file. It is a deliberate downgrade, not the default.
+Switch on *Options → keep the key out of the code* and the old two-channel model returns: the code
+carries only the offer, the key goes to the receiver by a second route (message, call, in person),
+and **the code can be intercepted and the file still stays shut.** That is stronger, and it costs the
+receiver one typing step.
+
+Either way: the manifest is Ed25519-signed with a key derived from the Transfer Key, so a forged
+manifest never verifies; every block is AES-256-GCM sealed with its own IV and the Share ID bound in
+as AAD; and the file on the sender's disk is read slice-by-slice, encrypted, and immediately
+forgotten — no plaintext copy is ever made.
 
 ---
 
@@ -94,7 +102,10 @@ SDC0.<base64url( JSON )>                 ← fallback when CompressionStream is 
   "expiresAt": 1792327746089,
   "maxDownloads": 3,       // or null
   "publicLabel": "contract draft v3",
-  "sdp": "v=0\r\n…"        // the offer (or answer), candidates already gathered
+  "sdp": "v=0\r\n…",       // the offer (or answer), candidates already gathered
+  "k":  "9f2c…",           // hex64 — the key, when the one-code flow is on
+  "ka": "9f2c…",           // hex64 ┐ instead: the two halves of a split key
+  "kb": "……"               // hex64 ┘
 }
 ```
 
@@ -103,12 +114,14 @@ Measured on a realistic data-channel SDP:
 | | size |
 |---|---|
 | SDP with 3 candidates + fingerprint | 854 chars |
-| **connection code (deflated)** | **793 chars** |
-| full receive link (code + 32-byte key) | 899 chars |
+| **connection code, key included (deflated)** | **705 chars** |
+| connection code with the key left out | 690 chars |
+| full receive link (code — the key is already in it) | ~830 chars |
 
-That is small enough to paste into any chat, small enough that a QR at error-correction M is easy
-to scan off a phone screen, and small enough to be worth the deflate step — without it the code
-would be ~1 400 characters and the QR would be much denser.
+The key costs about 25 characters, because 64 hex characters deflate well. The code is still short
+enough to paste into any chat and still scans comfortably off a phone screen at error-correction M
+(QR version 18–22, about 3.4 px per module at 340 px — measured with the real encoder, and the
+receive link adds only the fixed URL wrapper).
 
 Candidate gathering is deliberately **non-trickle**: the browser waits (at most 4 s) for
 `iceGatheringState === "complete"` so the code is self-contained. A code with partial candidates
@@ -229,9 +242,12 @@ asleep, because while their device is asleep there is nothing to serve.
 * *Metadata.* Peer-to-peer means the two devices learn each other's IP addresses — that is inherent
   to a direct connection, not a bug. The public STUN server sees those addresses too (it never sees
   data).
-* *The existence of a share.* The code is not secret: anyone who has it can complete a handshake
-  and pull ciphertext. They cannot decrypt it. `publicLabel` and the file size are visible.
-* *The merged link.* If you press "receive link", anyone who sees the URL can open the file.
+* *The existence of a share.* Anyone who has the code can complete a handshake and pull ciphertext.
+  **And by default the code carries the key**, so whoever holds it can read the file until the
+  sender presses Stop — that is the price of the two-scan, zero-typing flow. With the key kept out
+  of the code (Options), holders of the code can pull ciphertext but cannot decrypt it.
+* *The merged link.* The "Copy link" button puts the code — key included, by default — in a URL.
+  Anyone who sees that URL can open the file.
 * *A compromised endpoint.* If the sender's device is compromised, encryption cannot help.
 * *Abuse.* With no server there is no rate limiting for anyone to do: the only thing an attacker can
   hammer is the sender's device, which can Stop.
@@ -240,11 +256,12 @@ asleep, because while their device is asleep there is nothing to serve.
 * *Denial by network.* Some networks (symmetric NAT, restrictive corporate/mobile) refuse a direct
   path. Without a TURN relay there is no fallback except a different network.
 
-**Why a man-in-the-middle cannot win.** A MITM sitting in the chat could substitute their own code
-and reply — but the key arrives over a *different* channel, and the signing key is derived from it.
-The attacker would have to be in both channels to forge a manifest the receiver would accept.
-Putting the key in the same channel (the merged link) is exactly the case where this collapses, and
-the UI says so.
+**Why a man-in-the-middle cannot win — in the opt-in mode.** A MITM sitting in the chat could
+substitute their own code and reply — but with *keep the key out of the code*, the key arrives over
+a *different* channel, and the signing key is derived from it. The attacker would have to be in both
+channels to forge a manifest the receiver would accept. In the default one-code flow this property
+is gone by design: the code is a bearer token for the live share, and the UI says so on the very
+card that shows the QR.
 
 ---
 
@@ -295,11 +312,11 @@ There are **no secrets, no environment variables and no deploy workflow**. CI do
 | `src/rtc.ts` | `RTCPeerConnection` glue, non-trickle ICE, the connection-code codec, `RtcChannel` |
 | `src/serve.ts` | `LiveSession` — the sender's "server": code rotation, connections, stats, Stop |
 | `src/qr.ts` | QR rendering and decoding (camera, gallery import, jsQR fallback) |
-| `src/send.ts` | the live share card: code out, reply in, key separately |
-| `src/receive.ts` | code in, reply out, unlock, block loop, sink |
-| `src/dash.ts` | per-device transfer list, local window extension, Stop/Kill |
+| `src/send.ts` | the share flow: pick a file, options behind a disclosure, one QR out, reply in, live stats, wake lock |
+| `src/receive.ts` | code in, reply out, key from the code (no typing) or typed, one-tap save, block loop, sink |
+| `src/dash.ts` | per-device transfer list, key viewer, local window extension, Stop |
 | `src/vault.ts` | sender key vault + passphrase-sealed key backup files (no server) |
-| `src/p2p.test.ts` | connection-code codec + a real byte-exact transfer over a simulated channel |
+| `src/p2p.test.ts` | connection-code codec (with and without the key) + real byte-exact transfers over simulated channels |
 | `src/crypto.test.ts` | the crypto core (unchanged since v3) |
 
 ---

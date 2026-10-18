@@ -5,10 +5,10 @@
  * on this device the moment it was asked for. Nothing is stored anywhere else, so there is
  * nothing left over when the session stops.
  */
-import type { SenderSet } from "./crypto";
+import { toHex, type SenderSet } from "./crypto";
 import { CiphertextSource, type Geometry } from "./container";
 import { SenderAgent, type BlockChannel, type Budget } from "./protocol";
-import { applyAnswer as foldAnswer, createInvite, type SenderPeer } from "./rtc";
+import { applyAnswer as foldAnswer, createInvite, type InviteMeta, type SenderPeer } from "./rtc";
 
 export type ServeState = "waiting" | "serving" | "stopped";
 
@@ -31,6 +31,12 @@ export interface LiveOptions {
   maxDownloads: number | null;
   publicLabel: string | null;
   sealedManifestB64: string;
+  /**
+   * Put the key inside the connection code (the simple one-code flow) instead of leaving the
+   * receiver to type it. Defaults to false so the safer two-channel behaviour is what you get
+   * unless it is asked for explicitly.
+   */
+  embeddedKey?: boolean;
 }
 
 export class LiveSession {
@@ -100,6 +106,7 @@ export class LiveSession {
       expiresAt: this.budget.expiresAt,
       maxDownloads: this.budget.maxDownloads,
       publicLabel: this.opts.publicLabel,
+      ...this.keyMeta(),
     });
     if (this.stopped) {
       peer.close();
@@ -198,6 +205,14 @@ export class LiveSession {
     this.paint();
     // Ready for the next receiver straight away: the code just used admits only its own peer.
     void this.rotateCode();
+  }
+
+  /** Key material for the next code: only when the one-code flow is on. */
+  private keyMeta(): Pick<InviteMeta, "keyHex" | "halfAHex" | "halfBHex"> {
+    if (!this.opts.embeddedKey) return {};
+    const { halfA, halfB, transferKey } = this.set;
+    if (halfA && halfB) return { halfAHex: toHex(halfA), halfBHex: toHex(halfB) };
+    return { keyHex: toHex(transferKey) };
   }
 
   private paint(): void {

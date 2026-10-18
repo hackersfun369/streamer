@@ -3,23 +3,29 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <meta name="color-scheme" content="dark light" />
-  <meta name="description" content="StreamDrop — key-based, end-to-end encrypted file transfer with no server at all. The file stays on the sender's device and streams device to device; the key is the only thing that opens it." />
-  <title>StreamDrop — encrypted file drop</title>
+  <meta name="color-scheme" content="dark" />
+  <meta name="theme-color" content="#07070d" />
+  <meta name="description" content="StreamDrop — send a file straight from one device to another. No accounts, no upload, no server in the middle." />
+  <title>StreamDrop</title>
   <link rel="icon" href="/icon.svg" type="image/svg+xml" />
 </head>
 <body>
   <a class="skip-link" href="#screen">Skip to content</a>
 
+  <div class="glow" aria-hidden="true"></div>
+
   <header class="topbar">
     <div class="brand">
-      <img src="/icon.svg" alt="" width="28" height="28" aria-hidden="true" />
-      <strong>StreamDrop</strong>
+      <img src="/icon.svg" alt="" width="30" height="30" aria-hidden="true" />
+      <span class="brand-text">
+        <strong>StreamDrop</strong>
+        <small>device to device</small>
+      </span>
     </div>
-    <nav class="tabs" role="tablist" aria-label="Main">
+    <nav class="segmented" role="tablist" aria-label="Main">
       <a role="tab" id="tab-send" href="#/send" aria-selected="true">Send</a>
       <a role="tab" id="tab-receive" href="#/receive" aria-selected="false">Receive</a>
-      <a role="tab" id="tab-dash" href="#/dash" aria-selected="false">My transfers</a>
+      <a role="tab" id="tab-dash" href="#/dash" aria-selected="false">Transfers</a>
     </nav>
   </header>
 
@@ -30,13 +36,14 @@
   </main>
 
   <footer class="foot">
-    <span class="hint">No accounts · no server · no cloud storage · keys never leave the browser · files stream device to device</span>
+    <span class="foot-dot" aria-hidden="true"></span>
+    <span>No account · no upload · no server copy — the file streams straight from the sender's device</span>
   </footer>
 
   <div id="toast-region">
     <div id="aria-polite" role="status" aria-live="polite" class="visually-hidden"></div>
     <div id="aria-assertive" role="alert" aria-live="assertive" class="visually-hidden"></div>
-    <div id="toast" class="toast" hidden></div>
+    <div id="toast" class="toast" role="status" hidden></div>
   </div>
 
   <script type="module" src="/src/main.ts"></script>

@@ -1,9 +1,12 @@
-/* StreamDrop v5 — Send: the file stays on THIS device, and this device IS the server.
+/* StreamDrop — Send.
  *
- * Nothing is uploaded and nothing is registered anywhere. The sender hands out a "connection
- * code" (QR and/or text) that lets one receiver's device find this one directly; the receiver's
- * reply comes back, and from then on ciphertext is encrypted per request and streamed
- * device-to-device. Stop closes every connection at once, and there is no leftover copy.
+ * The whole screen is built around one idea: the fewer decisions, the better the transfer. Pick a
+ * file, press one button, show one code. The key rides inside that code by default, so the
+ * receiver never types anything; anyone who wants the older "key on its own channel" behaviour can
+ * switch it on under Options.
+ *
+ * The file stays on this device. This tab *is* the server, so the code that gets handed out is a
+ * single-use invitation to stream from here — and Stop (or closing the tab) ends it instantly.
  */
 import {
   CHUNK_SIZE, buildHeader, chunkCountFor, createSender, b64, toHex,
@@ -11,9 +14,9 @@ import {
 } from "./crypto";
 import { geometryFor } from "./container";
 import { LiveSession, type ServeState, type ServeStats } from "./serve";
-import { announce, el, fmtBytes } from "./ui";
-import { cameraAvailable, importQrImage, qrCard, scanQrCamera } from "./qr";
-import { saveVaultRow, renderRecoveryCard, downloadKeyBackup } from "./vault";
+import { el, fmtBytes, fmtEta, fmtSpeed, note, toast } from "./ui";
+import { cameraAvailable, importQrImage, qrDataUrl, scanQrCamera } from "./qr";
+import { saveVaultRow, downloadKeyBackup } from "./vault";
 
 interface ActiveShare {
   session: LiveSession;
@@ -21,20 +24,26 @@ interface ActiveShare {
   manifest: Manifest;
   expiresAt: number;
   stats: ServeStats;
+  /** True when the key is inside the code, so the receiver needs nothing else. */
+  embeddedKey: boolean;
 }
 
 /** Module-level so a running share survives switching tabs inside the app (it dies with the page). */
 let active: ActiveShare | null = null;
 
-/** Used by the dashboard's Kill button when the killed transfer is being served from here. */
+/** Set by the live share card so a paste anywhere in the app can finish the handshake. */
+let replySink: ((text: string) => void) | null = null;
+
 export function stopShare(codeFp: string): boolean {
   if (!active || active.set.codeFp !== codeFp) return false;
   active.session.stop("stopped by the sender");
   active = null;
+  replySink = null;
+  void releaseWakeLock();
   return true;
 }
 
-/** Which share (if any) this tab is serving right now — the dashboard's honest status source. */
+/** Which share (if any) this tab is serving right now — the transfers list's honest status source. */
 export function servingCodeFp(): string | null {
   return active?.set.codeFp ?? null;
 }
@@ -46,113 +55,216 @@ export function extendShare(codeFp: string, hours: number): number | null {
   return active.expiresAt;
 }
 
+/* ── keeping the sender awake ─────────────────────────────────────
+ * A sleeping phone kills the transfer, and this device is the source. Holding a screen wake lock
+ * is the honest fix: it does exactly one thing, and it is released the moment sharing stops. */
+let wakeLock: { release: () => Promise<void> } | null = null;
+
+async function holdWakeLock(): Promise<void> {
+  const wl = (navigator as unknown as { wakeLock?: { request: (t: string) => Promise<{ release: () => Promise<void> }> } }).wakeLock;
+  if (!wl || wakeLock) return;
+  try {
+    wakeLock = await wl.request("screen");
+  } catch {
+    /* denied, or the tab is in the background — not worth telling the user about */
+  }
+}
+
+async function releaseWakeLock(): Promise<void> {
+  const held = wakeLock;
+  wakeLock = null;
+  try {
+    await held?.release();
+  } catch {
+    /* already gone */
+  }
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && active) void holdWakeLock();
+});
+
+/* ── pasting the reply from anywhere ─────────────────────────────── */
+const looksLikeCode = (text: string): boolean => /^SDC[01]\./.test(text.trim());
+
+document.addEventListener("paste", (event) => {
+  if (!replySink) return;
+  const target = event.target as HTMLElement | null;
+  // Inside a text field the field's own input handler takes it; this is for pasting anywhere else.
+  if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) return;
+  const text = event.clipboardData?.getData("text") ?? "";
+  if (!looksLikeCode(text)) return;
+  event.preventDefault();
+  replySink(text);
+});
+
+/* ── the picker ──────────────────────────────────────────────────── */
+
 export function initSend(root: HTMLElement = document.getElementById("screen-send") as HTMLElement): void {
   root.textContent = "";
 
-  const state = { file: null as File | null, retention: 24, busy: false };
+  if (active) {
+    const card = el("div", {});
+    root.append(hero(active.manifest.name), card);
+    renderShare(card, active);
+    return;
+  }
 
-  const fileInput = el("input", { type: "file", id: "file", "aria-describedby": "file-hint" });
-  const fileMeta = el("p", {
-    class: "hint",
-    id: "file-hint",
-    text: "Any size. The file never leaves this device — receivers stream the encrypted bytes from this tab while it stays open.",
-  });
+  const state = { file: null as File | null, busy: false };
 
-  const retention = el("input", { type: "range", min: "1", max: "72", value: "24", id: "retention" });
-  const retentionOut = el("output", { for: "retention", text: "24 h" });
-  retention.addEventListener("input", () => {
-    state.retention = Number(retention.value);
-    retentionOut.value = `${state.retention} h`;
-    announce(`Receivers may download for ${state.retention} hours`);
-  });
-
-  const burn = el("select", { id: "burn" },
-    el("option", { value: "", text: "No download limit (expires on its own)" }),
-    el("option", { value: "1", text: "One receiver only" }),
-    el("option", { value: "3", text: "Allow 3 downloads" }),
-    el("option", { value: "10", text: "Allow 10 downloads" }),
-    el("option", { value: "custom", text: "Custom…" }),
+  const drop = el("div", {
+    class: "drop",
+    role: "button",
+    tabindex: "0",
+    "aria-label": "Choose a file to send",
+  },
+    el("span", { class: "ico", text: "📄" }),
+    el("span", { class: "t", text: "Choose a file" }),
+    el("span", { class: "d", text: "or drop it here" }),
   );
-  const burnCustom = el("input", { type: "number", min: "1", max: "10000", value: "2", hidden: true, "aria-label": "Custom download limit" });
-  burn.addEventListener("change", () => {
-    burnCustom.hidden = burn.value !== "custom";
-  });
+  const fileInput = el("input", { type: "file", hidden: true, "aria-hidden": "true" });
+  const chosen = el("div", { hidden: true });
+  const sendBtn = el("button", { class: "btn primary block big", type: "button", text: "Create transfer", disabled: true });
 
-  const label = el("input", { type: "text", maxlength: "64", placeholder: "Optional note visible to receivers before the key (e.g. 'contract draft v3')" });
+  const pickCard = el("div", { class: "card stack" },
+    drop, fileInput, chosen, sendBtn,
+    el("p", { class: "hint tiny", text: "Your file is never uploaded — receivers stream the encrypted bytes from this tab." }),
+  );
 
-  const split = el("input", { type: "checkbox", id: "split", "aria-describedby": "split-hint" });
-  const passphrase = el("input", { type: "password", placeholder: "min 12 chars — seals a key backup you keep yourself" });
+  /* ── options (everything that is not the happy path lives in here) ── */
 
-  const sendBtn = el("button", { class: "btn primary", type: "button", text: "Start sharing" });
-  const status = el("p", { class: "hint", role: "status" });
-  const resultCard = el("div", {});
-  const recovery = el("div", {});
+  const windowSelect = el("select", null,
+    el("option", { value: "1", text: "1 hour" }),
+    el("option", { value: "6", text: "6 hours" }),
+    el("option", { value: "24", text: "24 hours", selected: true }),
+    el("option", { value: "168", text: "7 days" }),
+  );
+  const limitSelect = el("select", null,
+    el("option", { value: "", text: "Unlimited", selected: true }),
+    el("option", { value: "1", text: "One download" }),
+    el("option", { value: "3", text: "3 downloads" }),
+    el("option", { value: "10", text: "10 downloads" }),
+  );
+  const label = el("input", { type: "text", maxlength: "60", placeholder: "e.g. contract draft" });
+  const split = el("input", { type: "checkbox" });
+  const passphrase = el("input", { type: "password", placeholder: "at least 12 characters" });
+  const separateKey = el("input", { type: "checkbox" });
 
-  const form = el("div", { class: "card" },
-    el("h2", { text: "Send a file" }),
-    el("p", { class: "hint", text: "Your file stays on this device. Receivers pull the encrypted bytes straight from this tab — nothing is uploaded, no account is needed, and no copy is stored anywhere." }),
-    el("label", { for: "file", text: "File" }),
-    fileInput, fileMeta,
-    el("label", { for: "retention", text: "Receivers may download for" }),
-    retention, retentionOut,
-    el("p", { class: "hint", text: "Keep this tab open while a receiver downloads: the window below is the promise, but this device is the source. Closing it, sleeping the phone, or pressing Stop ends every download immediately." }),
-    el("label", { for: "burn", text: "Download limit" }),
-    el("div", null, burn, burnCustom),
-    el("label", { for: "label", text: "Receiver note (optional)" }),
-    label,
-    el("div", { class: "row" },
-      el("div", { class: "card", style: "margin:0" },
-        el("label", { class: "hint", for: "split", text: "Split-key (2-of-2)" }),
-        split,
-        el("p", { class: "hint", id: "split-hint", text: "Splits the key into two halves to send over different channels. Both halves are required to open." }),
+  const options = el("details", { class: "advanced" },
+    el("summary", { text: "Options" }),
+    el("div", { class: "body" },
+      el("div", { class: "row" },
+        el("div", { class: "field grow" },
+          el("label", { for: "opt-window", text: "Available for" }),
+          windowSelect,
+        ),
+        el("div", { class: "field grow" },
+          el("label", { for: "opt-limit", text: "Downloads" }),
+          limitSelect,
+        ),
       ),
-      el("div", { class: "card", style: "margin:0" },
-        el("label", { class: "hint", for: "recovery", text: "Key backup passphrase (optional)" }),
+      el("div", { class: "field" },
+        el("label", { for: "opt-label", text: "Note for the receiver (optional)" }),
+        label,
+      ),
+      el("label", { class: "check" },
+        split,
+        el("span", null,
+          el("span", { class: "t", text: "Split key in two (2-of-2)" }),
+          el("span", { class: "d", text: "Both halves are needed to open the file. Send them over two different channels." }),
+        ),
+      ),
+      el("div", { class: "field" },
+        el("label", { for: "opt-pass", text: "Backup passphrase (optional)" }),
         passphrase,
-        el("p", { class: "hint", text: "Seals a backup file of your key with the passphrase (PBKDF2 ×250k + AES-GCM). You keep the file; only the passphrase unwraps it." }),
+        el("p", { class: "hint tiny", text: "Writes a sealed copy of the key you can keep, in case you need to reopen this transfer later." }),
+      ),
+      el("label", { class: "check" },
+        separateKey,
+        el("span", null,
+          el("span", { class: "t", text: "Keep the key out of the code" }),
+          el("span", { class: "d", text: "Stronger: the code alone then cannot open the file, so the receiver has to receive the key on a second channel and type it in." }),
+        ),
       ),
     ),
-    sendBtn, status,
   );
-  root.append(form, resultCard);
-  renderRecoveryCard(recovery);
-  root.append(recovery);
 
-  fileInput.addEventListener("change", () => {
-    state.file = fileInput.files?.[0] ?? null;
-    if (state.file) {
-      fileMeta.textContent = `${state.file.name} — ${fmtBytes(state.file.size)} (${state.file.type || "unknown type"})`;
+  root.append(hero(), pickCard, options);
+
+  const pick = (): void => fileInput.click();
+  drop.addEventListener("click", pick);
+  drop.addEventListener("keydown", (e) => {
+    const key = (e as KeyboardEvent).key;
+    if (key === "Enter" || key === " ") {
+      e.preventDefault();
+      pick();
     }
   });
+  drop.addEventListener("dragover", (e) => {
+    e.preventDefault();
+    drop.classList.add("over");
+  });
+  drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+  drop.addEventListener("drop", (e) => {
+    e.preventDefault();
+    drop.classList.remove("over");
+    const file = (e as DragEvent).dataTransfer?.files?.[0];
+    if (file) setFile(file);
+  });
 
-  sendBtn.addEventListener("click", () => void doSend());
-  if (active) renderShare(resultCard, active);
+  fileInput.addEventListener("change", () => {
+    const file = fileInput.files?.[0];
+    if (file) setFile(file);
+  });
 
-  async function doSend(): Promise<void> {
-    if (state.busy) return;
-    if (!state.file) {
-      announce("Choose a file first", true);
-      fileInput.focus();
-      return;
-    }
-    if (state.file.size === 0) {
-      announce("Empty files can't be transferred — pick a file with content.", true);
-      return;
-    }
+  function setFile(file: File): void {
+    state.file = file;
+    drop.hidden = true;
+    chosen.hidden = false;
+    chosen.textContent = "";
+    const change = el("button", { class: "btn ghost small", type: "button", text: "Change" });
+    change.addEventListener("click", (e) => {
+      e.stopPropagation();
+      drop.hidden = false;
+      chosen.hidden = true;
+      state.file = null;
+      sendBtn.disabled = true;
+      fileInput.value = "";
+    });
+    chosen.append(
+      el("div", { class: "file-row" },
+        el("span", { class: "ico", text: "📦" }),
+        el("div", { class: "grow" },
+          el("div", { class: "name", text: file.name }),
+          el("div", { class: "meta", text: `${fmtBytes(file.size)}${file.type ? ` · ${file.type}` : ""}` }),
+        ),
+        change,
+      ),
+    );
+    sendBtn.disabled = file.size === 0;
+    if (file.size === 0) note("That file is empty — pick one with content.", "err");
+  }
+
+  sendBtn.addEventListener("click", () => void start());
+
+  async function start(): Promise<void> {
+    if (state.busy || !state.file) return;
     const pw = passphrase.value;
     if (pw && pw.length < 12) {
-      announce("Key backup passphrase must be at least 12 characters", true);
+      note("The backup passphrase needs at least 12 characters.", "err");
       passphrase.focus();
       return;
     }
     state.busy = true;
     sendBtn.disabled = true;
-    status.textContent = "Generating keys in this tab…";
+    sendBtn.textContent = "Preparing…";
 
     try {
+      const embeddedKey = !separateKey.checked;
       const set = await createSender({ split: split.checked, recoveryPassphrase: pw || undefined });
       const file = state.file;
-      const expiresAt = Date.now() + state.retention * 3600_000;
+      const expiresAt = Date.now() + Number(windowSelect.value) * 3600_000;
+      const maxDownloads = limitSelect.value === "" ? null : Number(limitSelect.value);
       const manifest: Manifest = {
         v: 1,
         name: file.name,
@@ -165,15 +277,15 @@ export function initSend(root: HTMLElement = document.getElementById("screen-sen
         receiverAuth: set.receiverAuth,
         mode: "direct",
       };
-      status.textContent = "Sealing the manifest…";
       const header = await buildHeader(set, manifest);
       const geom = geometryFor(file, header.bytes);
 
       const session = new LiveSession(file, set, geom, {
         expiresAt,
-        maxDownloads: burnValue(),
-        publicLabel: label.value || null,
+        maxDownloads,
+        publicLabel: label.value.trim() || null,
         sealedManifestB64: b64(header.bytes),
+        embeddedKey,
       });
 
       saveVaultRow({
@@ -188,60 +300,204 @@ export function initSend(root: HTMLElement = document.getElementById("screen-sen
         mode: "direct",
         createdAt: manifest.createdAt,
         expiresAt,
-        maxDownloads: burnValue(),
+        maxDownloads,
         hasRecovery: !!set.recover,
       });
 
-      active = { session, set, manifest, expiresAt, stats: { ...session.stats } };
-      renderShare(resultCard, active);
+      active = { session, set, manifest, expiresAt, stats: { ...session.stats }, embeddedKey };
       await session.start();
-      status.textContent = "";
-      announce("Sharing is live. Send the connection code to your receiver and keep this tab open.");
+      void holdWakeLock();
+
+      root.textContent = "";
+      const card = el("div", {});
+      root.append(hero(file.name), card);
+      renderShare(card, active);
+      note("Transfer created — show the code to your receiver.");
     } catch (e) {
-      status.textContent = "";
-      announce(e instanceof Error ? e.message : "Send failed", true);
-      resultCard.textContent = "";
-      resultCard.append(el("p", { class: "hint", role: "alert", text: e instanceof Error ? e.message : "Send failed — see console." }));
+      const msg = e instanceof Error ? e.message : "Couldn't create the transfer.";
+      note(msg, "err");
+      sendBtn.disabled = false;
+      sendBtn.textContent = "Create transfer";
     } finally {
       state.busy = false;
-      sendBtn.disabled = false;
     }
-  }
-
-  function burnValue(): number | null {
-    if (burn.value === "") return null;
-    if (burn.value === "custom") return Math.max(1, Number(burnCustom.value) || 2);
-    return Number(burn.value);
   }
 }
 
-/* ── the live share card ─────────────────────────────────────────────────────────────
- * Three numbered steps, because the handshake is genuinely conversational: send a code out,
- * take a reply back, hand over the key separately. The card rebuilds only the parts that
- * change, so a half-typed reply is never lost when a new code is minted.
- */
+function hero(fileName?: string): HTMLElement {
+  return el("div", { class: "hero" },
+    el("h1", null,
+      fileName ? "Sending " : "Send a file. ",
+      fileName
+        ? el("span", { class: "accent", text: fileName })
+        : el("span", { class: "accent", text: "Straight to them." }),
+    ),
+    el("p", {
+      text: fileName
+        ? "Show the code below to the person receiving it."
+        : "No upload, no account, no copy left behind — the bytes go from this device to theirs.",
+    }),
+  );
+}
+
+/* ── the live share ──────────────────────────────────────────────── */
+
 function renderShare(card: HTMLElement, share: ActiveShare): void {
   card.textContent = "";
   const { set, manifest, session } = share;
 
-  const stateLine = el("p", { class: "hint", role: "status" });
-  const statsLine = el("p", { class: "hint mono" });
-  const stopBtn = el("button", { class: "btn danger small", type: "button", text: "Stop sharing" });
+  const steps = el("div", { class: "steps" },
+    el("div", { class: "seg active" }),
+    el("div", { class: "seg" }),
+    el("div", { class: "seg" }),
+  );
+  const segs = steps.children;
+  const paintSteps = (n: 1 | 2 | 3): void => {
+    for (let i = 0; i < 3; i++) {
+      const seg = segs[i] as HTMLElement;
+      seg.className = `seg${i + 1 < n ? " done" : ""}${i + 1 === n ? " active" : ""}`;
+    }
+  };
 
-  const paintStatus = (state: ServeState, detail?: string): void => {
-    const text: Record<ServeState, string> = {
-      waiting: detail ? `Waiting for a receiver — ${detail}.` : "Sharing is live — send the connection code to a receiver.",
-      serving: "Serving directly to a receiver's device.",
-      stopped: `Sharing stopped${detail ? ` (${detail})` : ""}.`,
-    };
-    stateLine.textContent = text[state];
-    stateLine.className = state === "stopped" ? "hint" : "hint ok";
-    if (state === "stopped") stopBtn.disabled = true;
-  };
-  const paintStats = (stats: ServeStats): void => {
-    share.stats = stats;
-    statsLine.textContent = `${stats.downloads} download${stats.downloads === 1 ? "" : "s"} started · ${stats.requests} range request${stats.requests === 1 ? "" : "s"} · ${fmtBytes(stats.bytesOut)} served${stats.lastAt ? ` · last ${new Date(stats.lastAt).toLocaleTimeString()}` : ""}`;
-  };
+  const statusPill = el("span", { class: "pill live" }, el("span", { class: "pulse" }), el("span", { text: "Live" }));
+  const statusText = el("span", { class: "hint" });
+  const statsBox = el("div", { class: "stat-grid" });
+  const stopBtn = el("button", { class: "btn danger", type: "button", text: "Stop sharing" });
+  const backBtn = el("button", { class: "btn ghost", type: "button", text: "Send another file" });
+  backBtn.addEventListener("click", () => {
+    stopShare(set.codeFp);
+    resetMeter();
+    initSend();
+  });
+
+  const shareCard = el("div", { class: "card" },
+    el("div", { class: "spread" },
+      el("div", null,
+        el("h2", { text: manifest.name }),
+        el("p", { class: "hint", text: `${fmtBytes(manifest.size)} · ${manifest.mime}` }),
+      ),
+      statusPill,
+    ),
+    el("div", { class: "spread", style: "margin-top:14px" },
+      el("span", { class: "share-id", text: set.shareId, "aria-label": `Transfer ${set.shareId}` }),
+      el("span", { class: "hint", text: `open until ${new Date(share.expiresAt).toLocaleString()}` }),
+    ),
+    steps,
+    el("div", { class: "status-line" }, statusText),
+    statsBox,
+    el("div", { class: "row", style: "margin-top:14px" },
+      stopBtn,
+      backBtn,
+    ),
+  );
+
+  /* step 1 — the code that goes out */
+  const qrHolder = el("div", { class: "qr-frame" });
+  const codeField = el("textarea", { class: "code-box mono", rows: "3", readOnly: true, spellcheck: "false", "aria-label": "Connection code" });
+  const codeHead = el("div", { class: "step-head active" },
+    el("span", { class: "step-num", text: "1" }),
+    el("div", { class: "step-text" },
+      el("h3", { text: "Show this code to your receiver" }),
+      el("p", { class: "hint", text: share.embeddedKey
+        ? "They scan it with their camera — that is the whole setup. Treat it as the key to your file: anyone who gets it can download until you press Stop."
+        : "They scan it with their camera. It only finds this device; the Transfer Key is separate and stays a secret." }),
+    ),
+  );
+  const copyCode = el("button", { class: "btn", type: "button", text: "Copy code" });
+  copyCode.addEventListener("click", () => void copyText(codeField.value, "Connection code copied"));
+  const copyLink = el("button", { class: "btn ghost", type: "button", text: "Copy link" });
+  copyLink.addEventListener("click", () => void copyText(
+    `${location.origin}${location.pathname}#/receive?c=${encodeURIComponent(codeField.value)}`,
+    "Link copied — send it however you like",
+  ));
+
+  const codeCard = el("div", { class: "card" },
+    codeHead,
+    qrHolder,
+    codeField,
+    el("div", { class: "row", style: "margin-top:12px" }, copyCode, copyLink),
+  );
+
+  /* step 2 — the reply that comes back */
+  const answerField = el("textarea", {
+    class: "code-box mono", rows: "3", spellcheck: "false",
+    placeholder: "Paste their reply here", "aria-label": "Reply code from the receiver",
+  });
+  const answerStatus = el("p", { class: "hint" });
+  const video = el("video", { hidden: true, playsinline: true, "aria-label": "Camera preview" });
+
+  const scanBtn = el("button", { class: "btn primary", type: "button", text: "Scan their reply" });
+  const pasteBtn = el("button", { class: "btn ghost small", type: "button", text: "Import a screenshot" });
+  const hasCamera = cameraAvailable();
+  if (!hasCamera) scanBtn.hidden = true;
+  else scanBtn.addEventListener("click", () => void (async () => {
+    try {
+      const raw = await scanQrCamera(video);
+      if (raw) await takeReply(raw);
+    } catch {
+      note("Camera unavailable — paste the reply instead.", "err");
+    }
+  })());
+  pasteBtn.addEventListener("click", () => void (async () => {
+    try {
+      const raw = await importQrImage();
+      if (raw) await takeReply(raw);
+    } catch (e) {
+      note(e instanceof Error ? e.message : "Couldn't read that image.", "err");
+    }
+  })());
+
+  const step2Head = el("div", { class: "step-head active" },
+    el("span", { class: "step-num", text: "2" }),
+    el("div", { class: "step-text" },
+      el("h3", { text: "Take their reply" }),
+      el("p", { class: "hint", text: "They will show you a reply code. Scan it, or paste it here — it is not a secret." }),
+    ),
+  );
+  const answerCard = el("div", { class: "card" },
+    step2Head,
+    answerField,
+    el("div", { class: "row", style: "margin-top:12px" }, scanBtn, pasteBtn),
+    video,
+    answerStatus,
+  );
+
+  /* step 3 — only when the key travels separately */
+  const keyCard = el("div", { class: "card", hidden: share.embeddedKey },
+    el("div", { class: "step-head" },
+      el("span", { class: "step-num", text: "3" }),
+      el("div", { class: "step-text" },
+        el("h3", { text: "Send the key on another channel" }),
+        el("p", { class: "hint", text: "This is what opens the file, and it is deliberately not in the code. Send it by a different route than the code — a message, a call, in person." }),
+      ),
+    ),
+  );
+  if (share.set.halfA && share.set.halfB) {
+    keyCard.append(
+      keyLine("Half A", toHex(share.set.halfA)),
+      keyLine("Half B", toHex(share.set.halfB)),
+      el("p", { class: "hint tiny", text: "Split key: each half alone reveals nothing. Two different channels, please." }),
+    );
+  } else {
+    keyCard.append(keyLine("Transfer Key", toHex(share.set.transferKey)));
+  }
+
+  /* advanced: the key, the backup, and the honest fine print */
+  const advanced = el("details", { class: "advanced" },
+    el("summary", { text: "Transfer details" }),
+    el("div", { class: "body" },
+      el("p", { class: "hint", text: "The file lives on this device only. Closing this tab, letting the phone sleep, or pressing Stop ends every download instantly — there is no server-side copy to fall back on." }),
+    ),
+  );
+  const backupBtn = el("button", { class: "btn ghost small", type: "button", text: "Download key backup" });
+  backupBtn.addEventListener("click", () => {
+    if (!share.set.recover) return;
+    downloadKeyBackup(set.shareId, share.set.recover.wrappedKey);
+    toast("Backup saved — keep it wherever you keep secrets", "ok");
+  });
+  if (share.set.recover) (advanced.querySelector(".body") as HTMLElement).append(backupBtn);
+
+  /* ── wiring ── */
 
   session.events = {
     onState: paintStatus,
@@ -250,211 +506,161 @@ function renderShare(card: HTMLElement, share: ActiveShare): void {
   };
   paintStats(share.stats);
   paintStatus(session.isServing ? "serving" : "waiting");
+  void paintCode(session.code);
+
+  replySink = (text) => void takeReply(text);
 
   stopBtn.addEventListener("click", () => {
     session.stop("stopped by the sender");
     active = null;
-    announce("Sharing stopped — every connection is closed and the codes are dead.");
+    replySink = null;
+    void releaseWakeLock();
+    statusPill.className = "pill bad";
+    statusPill.textContent = "Stopped";
+    stopBtn.disabled = true;
+    note("Stopped — every connection is closed and the code is dead.");
   });
 
-  /* ── codes and keys ── */
+  function paintStatus(state: ServeState, detail?: string): void {
+    const map: Record<ServeState, { text: string; pill: string; label: string; step: 1 | 2 | 3 }> = {
+      waiting: {
+        text: detail ?? (session.code ? "Waiting for a receiver to scan it." : "Preparing a fresh code…"),
+        pill: "live",
+        label: session.isServing ? "Connected" : "Live",
+        step: session.peerCount > 0 ? 3 : 2,
+      },
+      serving: { text: "Connected — the bytes are on their way.", pill: "ok", label: "Transferring", step: 3 },
+      stopped: { text: `Stopped${detail ? ` — ${detail}` : ""}.`, pill: "bad", label: "Stopped", step: 3 },
+    };
+    const view = map[state];
+    statusText.textContent = view.text;
+    statusPill.className = `pill ${view.pill}`;
+    statusPill.textContent = "";
+    if (view.pill === "live") statusPill.append(el("span", { class: "pulse" }));
+    statusPill.append(el("span", { text: view.label }));
+    paintSteps(view.step);
+    if (state === "stopped") {
+      stopBtn.disabled = true;
+      answerCard.hidden = true;
+      codeCard.hidden = true;
+      keyCard.hidden = true;
+    }
+  }
 
-  const copyRow = (value: string | (() => string), label: string, title?: string): HTMLElement => {
-    const read = (): string => (typeof value === "function" ? value() : value);
-    const btn = el("button", { class: "btn small", type: "button", text: `Copy ${label}` });
-    btn.addEventListener("click", async () => {
-      const text = read();
-      if (!text) {
-        announce("Nothing to copy yet.", true);
-        return;
-      }
-      try {
-        await navigator.clipboard.writeText(text);
-        announce(`${title ?? label} copied`);
-        btn.textContent = "Copied ✓";
-        setTimeout(() => (btn.textContent = `Copy ${label}`), 2000);
-      } catch {
-        announce("Copying failed — select the text and copy it manually.", true);
-      }
-    });
-    return btn;
-  };
+  function paintStats(stats: ServeStats): void {
+    const speed = meter(stats.bytesOut);
+    statsBox.textContent = "";
+    const add = (k: string, v: string): void => {
+      statsBox.append(el("div", { class: "stat" }, el("div", { class: "k", text: k }), el("div", { class: "v", text: v })));
+    };
+    add("Served", fmtBytes(stats.bytesOut));
+    add("Speed", speed === null ? "—" : fmtSpeed(speed));
+    add("Downloads", share.session.opts.maxDownloads != null ? `${stats.downloads} / ${share.session.opts.maxDownloads}` : String(stats.downloads));
+    if (stats.bytesOut > 0 && manifest.size > 0) {
+      const pct = Math.min(99.9, (stats.bytesOut / (manifest.size * 1.02)) * 100);
+      const left = speed && speed > 0 ? Math.max(0, (manifest.size - stats.bytesOut) / speed) : NaN;
+      add("Progress", `${pct.toFixed(0)} %${isFinite(left) ? ` · ${fmtEta(left)}` : ""}`);
+    }
+  }
 
-  /* step 1 — the connection code out */
-  const codeField = el("textarea", { class: "mono", rows: "3", readOnly: true, spellcheck: "false", "aria-label": "Connection code for the receiver" });
-  const codeQr = el("div", { class: "qr-wrap" });
-  const codeNote = el("p", { class: "hint", text: "Codes are single-use: one code admits exactly one receiver, and a fresh one appears as soon as somebody connects." });
-  const newCodeBtn = el("button", { class: "btn small", type: "button", text: "New code" });
-  newCodeBtn.addEventListener("click", () => void session.rotateCode());
-
-  let paintToken = 0;
   async function paintCode(code: string | null): Promise<void> {
-    const token = ++paintToken;
-    codeQr.textContent = "";
+    qrHolder.textContent = "";
     if (!code) {
       codeField.value = "";
       codeField.placeholder = session.isServing
-        ? "A receiver is connected. A new code appears when they finish."
-        : "Generating a connection code…";
-      codeQr.append(el("p", { class: "hint", text: "No code is available right now." }));
+        ? "A receiver is connected — a new code appears when they finish."
+        : "Preparing a connection code…";
       return;
     }
     codeField.value = code;
-    const qr = await qrCard(code, `streamdrop-${set.shareId}-code.png`, `Connection code QR for transfer ${set.shareId}`, 340);
-    if (token !== paintToken) return; // a newer code arrived while we were drawing
-    codeQr.append(qr);
-  }
-
-  /* step 2 — the receiver's reply back in */
-  const answerField = el("textarea", { rows: "3", spellcheck: "false", placeholder: "Paste the receiver's reply code here", "aria-label": "Reply code from the receiver" });
-  const answerBtn = el("button", { class: "btn primary", type: "button", text: "Connect receiver" });
-  const answerNote = el("p", { class: "hint" });
-  const video = el("video", { hidden: true, playsinline: true, "aria-label": "Camera preview" });
-  video.style.width = "260px";
-
-  const importBtn = el("button", { class: "btn small", type: "button", text: "Import QR image" });
-  importBtn.addEventListener("click", () => void (async () => {
     try {
-      const raw = await importQrImage();
-      if (!raw) return;
-      await takeReply(raw);
-    } catch (e) {
-      announce(e instanceof Error ? e.message : "Couldn't read that image.", true);
-    }
-  })());
-
-  const scanBtn = el("button", { class: "btn small", type: "button", text: "Scan QR", disabled: !cameraAvailable() });
-  scanBtn.addEventListener("click", () => void (async () => {
-    try {
-      const raw = await scanQrCamera(video);
-      if (!raw) return;
-      await takeReply(raw);
+      // 720 px of pixels shown at ~340 CSS px: crisp on any screen, still one small PNG.
+      const dataUrl = await qrDataUrl(code, 720, "M");
+      qrHolder.textContent = "";
+      qrHolder.append(el("div", { class: "qr-tile" }, el("img", { src: dataUrl, alt: `Connection code for transfer ${set.shareId}` })));
     } catch {
-      announce("Camera unavailable — paste the reply code or import a screenshot instead.", true);
+      qrHolder.append(el("p", { class: "hint", text: "QR rendering unavailable — copy the code instead." }));
     }
-  })());
-
-  answerBtn.addEventListener("click", () => void takeReply(answerField.value));
+  }
 
   async function takeReply(raw: string): Promise<void> {
     const text = (raw ?? "").trim();
-    if (!text) {
-      announce("Paste the receiver's reply code first.", true);
-      answerField.focus();
-      return;
-    }
-    answerBtn.disabled = true;
+    if (!text) return;
+    answerField.value = text;
+    answerStatus.textContent = "Checking that reply…";
+    scanBtn.disabled = true;
     try {
-      answerField.value = text;
       await session.acceptAnswer(text);
-      answerNote.textContent = "Reply accepted — finishing the direct connection. The receiver's screen will move on by itself.";
-      announce("Reply accepted — connecting directly to the receiver.");
+      answerStatus.textContent = "Connected — finishing the link to their device.";
+      note("Reply accepted — connecting directly.", "ok");
     } catch (e) {
-      const msg = e instanceof Error ? e.message : "Couldn't use that reply code.";
-      answerNote.textContent = msg;
-      announce(msg, true);
+      const msg = e instanceof Error ? e.message : "That reply code didn't work.";
+      answerStatus.textContent = msg;
+      note(msg, "err");
     } finally {
-      answerBtn.disabled = false;
+      scanBtn.disabled = false;
     }
   }
 
-  /* step 3 — the secret, on its own channel */
-  const keyCard = el("div", { class: "card" },
-    el("h2", { text: "3 · Transfer Key — send this separately" }),
-    el("p", { class: "hint", text: "The key is what actually opens the file, and it never travels with the connection code. Send it over a different channel than the code (chat vs email, or handed over in person). It is shown only here — store it now if you may need it later." }),
-  );
-  if (set.halfA && set.halfB) {
-    keyCard.append(
-      el("div", { class: "key-display mono", text: toHex(set.halfA) }),
-      copyRow(toHex(set.halfA), "half A"),
-      el("div", { class: "key-display mono", text: toHex(set.halfB) }),
-      copyRow(toHex(set.halfB), "half B"),
-      el("p", { class: "hint", text: "Split-key: each half alone reveals nothing. Send the halves over two different channels (e.g. chat + email)." }),
-    );
-  } else {
-    keyCard.append(
-      el("div", { class: "key-display mono", text: toHex(set.transferKey) }),
-      el("div", { class: "row" }, copyRow(toHex(set.transferKey), "key", "Transfer Key")),
-    );
-  }
-  const keyQr = el("div", { class: "qr-wrap" });
-  const keyPayload = set.halfA && set.halfB
-    ? `SD|2|${set.shareId}|${toHex(set.halfA)}|${toHex(set.halfB)}`
-    : `SD|1|${set.shareId}|${toHex(set.transferKey)}`;
-  keyCard.append(keyQr);
-  void qrCard(keyPayload, `streamdrop-${set.shareId}-key.png`, `Transfer key QR for ${set.shareId}`, 300)
-    .then((qr) => keyQr.append(qr))
-    .catch(() => keyQr.append(el("p", { class: "hint", text: "QR rendering unavailable — copy the key text instead." })));
-
-  if (set.recover) {
-    const backupBtn = el("button", { class: "btn small", type: "button", text: `Download key backup (${set.shareId}.keybackup.json)` });
-    backupBtn.addEventListener("click", () => {
-      downloadKeyBackup(set.shareId, set.recover!.wrappedKey);
-      announce("Key backup saved — keep it somewhere only you can reach.");
-    });
-    keyCard.append(
-      el("p", { class: "hint", text: "Your backup passphrase seals the key in this file. Nothing else can open it, and no server is involved: store the file wherever you keep your secrets." }),
-      backupBtn,
-    );
-  }
-
-  /* the one-step convenience link (explicitly a weaker two-channel story) */
-  const linkBtn = el("button", { class: "btn small", type: "button", text: "Copy receive link (code + key together)" });
-  linkBtn.addEventListener("click", async () => {
-    const code = session.code;
-    if (!code) {
-      announce("Wait for a connection code first.", true);
-      return;
-    }
-    const params = new URLSearchParams({ c: code });
-    if (set.halfA && set.halfB) {
-      params.set("k1", toHex(set.halfA));
-      params.set("k2", toHex(set.halfB));
-    } else {
-      params.set("k", toHex(set.transferKey));
-    }
-    const url = `${location.origin}${location.pathname}#/receive?${params.toString()}`;
-    try {
-      await navigator.clipboard.writeText(url);
-      announce("Receive link copied — it carries the key, so treat it as a secret.");
-    } catch {
-      announce("Copying failed — use the two-step codes instead.", true);
-    }
+  answerField.addEventListener("input", () => {
+    const value = answerField.value.trim();
+    if (looksLikeCode(value)) void takeReply(value);
   });
 
-  card.append(
-    el("div", { class: "card" },
-      el("h2", { text: `Sharing ${manifest.name}` }),
-      el("p", { class: "hint", text: `${fmtBytes(manifest.size)} · ${manifest.mime} · nothing leaves this device unencrypted.` }),
-      el("div", { class: "code-display", text: set.shareId, "aria-label": `Share ID ${set.shareId}` }),
-      stateLine,
-      statsLine,
-      el("p", { class: "hint", text: `Promised until ${new Date(share.expiresAt).toLocaleString()}${share.session.opts.maxDownloads != null ? ` · up to ${share.session.opts.maxDownloads} download(s)` : ""}. This device must stay awake and this tab open, or downloads stop immediately.` }),
-      stopBtn,
-    ),
-    el("div", { class: "card" },
-      el("h2", { text: "1 · Connection code — to the receiver" }),
-      el("p", { class: "hint", text: "The receiver pastes this into their Receive tab, scans the QR, or imports a screenshot of it. It is not secret, but it is single-use." }),
-      codeField,
-      el("div", { class: "row" }, copyRow(() => codeField.value, "code", "Connection code"), newCodeBtn),
-      codeQr, codeNote,
-    ),
-    el("div", { class: "card" },
-      el("h2", { text: "2 · The receiver's reply — back from them" }),
-      el("p", { class: "hint", text: "Paste the reply they send you (or scan / import its QR). That is what lets the two devices find each other directly." }),
-      answerField,
-      el("div", { class: "row" }, answerBtn, scanBtn, importBtn),
-      video, answerNote,
-    ),
-    keyCard,
-    el("div", { class: "card" },
-      el("h2", { text: "One-step alternative" }),
-      el("p", { class: "hint", text: "This puts the code and the key in the same link, which is the one thing the security model avoids — convenient, but anyone who sees that link can open the file. Prefer the two steps above." }),
-      linkBtn,
-    ),
-  );
+  card.append(shareCard, codeCard, answerCard, keyCard, advanced);
+}
 
-  void paintCode(session.code);
+function keyLine(title: string, value: string): HTMLElement {
+  const field = el("textarea", { class: "code-box mono", rows: "2", readOnly: true, spellcheck: "false", "aria-label": title });
+  field.value = value;
+  const copy = el("button", { class: "btn small", type: "button", text: `Copy ${title}` });
+  copy.addEventListener("click", () => void copyText(value, `${title} copied`));
+  return el("div", { class: "stack", style: "margin-bottom:12px" },
+    el("span", { class: "hint", text: title }),
+    field, copy,
+  );
+}
+
+async function copyText(text: string, message: string): Promise<void> {
+  if (!text) {
+    note("Nothing to copy yet.", "err");
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(text);
+    toast(message, "ok");
+  } catch {
+    note("Copying failed — select the text and copy it manually.", "err");
+  }
+}
+
+/* A tiny speed meter: bytes over time, smoothed, and honestly blank when nothing is moving. */
+let meterAt = 0;
+let meterBytes = 0;
+let meterRate = 0;
+
+function meter(bytes: number): number | null {
+  const now = Date.now();
+  if (meterAt === 0 || bytes < meterBytes) {
+    meterAt = now;
+    meterBytes = bytes;
+    meterRate = 0;
+    return null;
+  }
+  const dt = now - meterAt;
+  if (dt >= 500) {
+    const rate = ((bytes - meterBytes) / dt) * 1000;
+    meterRate = meterRate === 0 ? rate : meterRate * 0.6 + rate * 0.4;
+    meterAt = now;
+    meterBytes = bytes;
+  }
+  return meterRate > 0 ? meterRate : null;
+}
+
+function resetMeter(): void {
+  meterAt = 0;
+  meterBytes = 0;
+  meterRate = 0;
 }
 
 /* Closing the tab ends every download, so give the sender a chance to think twice. */

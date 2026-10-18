@@ -21,12 +21,29 @@ export interface InviteMeta {
   expiresAt: number;
   maxDownloads: number | null;
   publicLabel: string | null;
+  /**
+   * The one-code flow (the default in the UI): the key travels inside the connection code, so the
+   * receiver never types anything. It costs the two-channel property — whoever holds the code can
+   * fetch the file until the sender stops — which is why the sender can opt out and keep the key
+   * on a separate channel instead. Either way the container on disk stays encrypted.
+   */
+  keyHex?: string;          // hex64 — single-key transfers
+  halfAHex?: string;        // hex64 ┐ split-key transfers
+  halfBHex?: string;        // hex64 ┘
 }
 
-interface InviteWire extends InviteMeta {
+interface InviteWire {
   v: 5;
   t: "offer";
   sdp: string;
+  shareId: string;
+  codeFp: string;
+  expiresAt: number;
+  maxDownloads: number | null;
+  publicLabel: string | null;
+  k?: string;               // optional key material; short names keep the QR small
+  ka?: string;
+  kb?: string;
 }
 
 interface AnswerWire {
@@ -106,17 +123,44 @@ async function unpackCode(text: string): Promise<unknown> {
 /* ── invite / answer ─────────────────────────────────────────────── */
 
 export async function encodeInvite(meta: InviteMeta, sdp: string): Promise<string> {
-  const wire: InviteWire = { v: 5, t: "offer", ...meta, sdp };
+  const wire: InviteWire = {
+    v: 5,
+    t: "offer",
+    sdp,
+    shareId: meta.shareId,
+    codeFp: meta.codeFp,
+    expiresAt: meta.expiresAt,
+    maxDownloads: meta.maxDownloads,
+    publicLabel: meta.publicLabel,
+  };
+  if (meta.halfAHex && meta.halfBHex) {
+    wire.ka = meta.halfAHex;
+    wire.kb = meta.halfBHex;
+  } else if (meta.keyHex) {
+    wire.k = meta.keyHex;
+  }
   return packCode(wire);
 }
+
+const HEX64 = /^[0-9a-f]{64}$/;
 
 export async function parseInvite(code: string): Promise<InviteWire> {
   const wire = (await unpackCode(code)) as Partial<InviteWire> & { t?: string };
   if (wire.v !== 5) throw new Error("This connection code is from a different version of StreamDrop.");
   if (wire.t !== "offer") throw new Error("That is a reply code — paste it on the sender's screen instead.");
   if (typeof wire.sdp !== "string" || !wire.sdp.includes("v=0")) throw new Error("The connection code is damaged (no session description).");
-  if (typeof wire.codeFp !== "string" || !/^[0-9a-f]{64}$/.test(wire.codeFp)) throw new Error("The connection code is damaged (bad fingerprint).");
+  if (typeof wire.codeFp !== "string" || !HEX64.test(wire.codeFp)) throw new Error("The connection code is damaged (bad fingerprint).");
   if (typeof wire.shareId !== "string" || wire.shareId.length !== 7) throw new Error("The connection code is damaged (bad ID).");
+
+  const keyHex = typeof wire.k === "string" ? wire.k : undefined;
+  const halfAHex = typeof wire.ka === "string" ? wire.ka : undefined;
+  const halfBHex = typeof wire.kb === "string" ? wire.kb : undefined;
+  if (keyHex !== undefined && !HEX64.test(keyHex)) throw new Error("The connection code is damaged (bad key).");
+  if ((halfAHex !== undefined) !== (halfBHex !== undefined)) throw new Error("The connection code is damaged (only one key half arrived).");
+  if (halfAHex !== undefined && (!HEX64.test(halfAHex) || !HEX64.test(halfBHex!))) {
+    throw new Error("The connection code is damaged (bad key halves).");
+  }
+
   return {
     v: 5,
     t: "offer",
@@ -126,6 +170,8 @@ export async function parseInvite(code: string): Promise<InviteWire> {
     expiresAt: typeof wire.expiresAt === "number" ? wire.expiresAt : 0,
     maxDownloads: typeof wire.maxDownloads === "number" ? wire.maxDownloads : null,
     publicLabel: typeof wire.publicLabel === "string" ? wire.publicLabel : null,
+    ...(keyHex === undefined ? {} : { k: keyHex }),
+    ...(halfAHex === undefined ? {} : { ka: halfAHex, kb: halfBHex }),
   };
 }
 

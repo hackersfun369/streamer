@@ -45,6 +45,42 @@ export function announce(text: string, assertive = false): void {
   });
 }
 
+export type ToastKind = "ok" | "err" | "info";
+
+let toastTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** Transient visual confirmation. Screen readers get `announce` separately, so call both. */
+export function toast(text: string, kind: ToastKind = "info"): void {
+  const node = document.getElementById("toast");
+  if (!node) return;
+  node.textContent = text;
+  node.className = `toast ${kind}`;
+  node.hidden = false;
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => {
+    node.hidden = true;
+  }, kind === "err" ? 6000 : 3200);
+}
+
+/** Say it and show it — the usual case for anything the user must notice. */
+export function note(text: string, kind: ToastKind = "info"): void {
+  announce(text, kind === "err");
+  toast(text, kind);
+}
+
+export const fmtSpeed = (bytesPerSecond: number): string =>
+  bytesPerSecond <= 0 ? "—" : `${fmtBytes(bytesPerSecond)}/s`;
+
+/** "about 2 min left" — only when we can say something honest. */
+export const fmtEta = (secondsRemaining: number): string => {
+  if (!isFinite(secondsRemaining) || secondsRemaining <= 0) return "";
+  if (secondsRemaining < 1) return "almost done";
+  if (secondsRemaining < 60) return `${Math.ceil(secondsRemaining)} s left`;
+  const m = Math.floor(secondsRemaining / 60);
+  const s = Math.round(secondsRemaining % 60);
+  return `${m} min ${s.toString().padStart(2, "0")} s left`;
+};
+
 export const downloadBlob = (blob: Blob, name: string): void => {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");

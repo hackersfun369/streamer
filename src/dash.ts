@@ -1,134 +1,191 @@
-/* StreamDrop v5 — My transfers.
+/* StreamDrop — Transfers.
  *
- * There is no server list, so the list is this device's vault — which is exactly right now that
- * this device is also the source of the bytes. Every state here is local and honest: a share is
- * "serving now" only while this tab is actually serving it, and "active" only until the window
- * you promised runs out. Delete/Stop forgets the record and closes every connection; there is no
- * remote copy to delete, because the file never left this device.
+ * There is no server list, so this list is what this browser remembers: one row per transfer
+ * started here. Every status is local and honest — a share is "serving now" only while this tab
+ * is actually serving it, and the window you promised is a promise, not a remote setting.
+ *
+ * The key is kept here so you can show it again later (or restore it from a backup file); deleting
+ * a row forgets the key on this device. The file itself never moved.
  */
 import { stopShare, servingCodeFp, extendShare } from "./send";
-import { deleteVaultRow, qrEncode, loadVault, saveVaultRow, type VaultRow } from "./vault";
-import { qrCard } from "./qr";
-import { announce, el, fmtBytes, fmtDurationLeft } from "./ui";
-
-type LocalState = "serving" | "active" | "expired";
+import { deleteVaultRow, loadVault, renderRecoveryCard, type VaultRow } from "./vault";
+import { qrEncode } from "./crypto";
+import { qrDataUrl } from "./qr";
+import { announce, el, fmtBytes, fmtDurationLeft, note, toast } from "./ui";
 
 export function initDash(root: HTMLElement = document.getElementById("screen-dash") as HTMLElement): void {
   root.textContent = "";
+  root.append(hero(), list());
 
-  const head = el("div", { class: "card" },
-    el("h2", { text: "My transfers" }),
-    el("p", { class: "hint", text: "This list lives in this browser, because this device is what serves the file. Keys stay here too — a transfer made on another device can be reopened with its backup file on the Send screen." }),
+  const restore = el("details", { class: "advanced" },
+    el("summary", { text: "Restore a key from a backup file" }),
+    el("div", { class: "body recovery-slot" }),
   );
-  const refreshBtn = el("button", { class: "btn small", type: "button", text: "Refresh" });
-  refreshBtn.addEventListener("click", () => refresh());
-  head.append(refreshBtn);
-  const list = el("div", { id: "dash-list" });
-  root.append(head, list);
+  renderRecoveryCard(restore.querySelector(".body") as HTMLElement);
+  root.append(restore);
 
-  refresh();
-
-  function refresh(): void {
-    list.textContent = "";
+  function list(): HTMLElement {
+    const wrap = el("div", {});
     const rows = loadVault();
-    if (rows.length === 0) {
-      list.append(el("p", { class: "hint", text: "Nothing here yet — start a share and it will be listed on this device." }));
-      return;
-    }
-    const now = Date.now();
     const serving = servingCodeFp();
-    const table = el("table", { class: "transfers" });
-    table.append(el("thead", null,
-      el("tr", null,
-        el("th", { text: "ID" }),
-        el("th", { text: "File" }),
-        el("th", { text: "Status" }),
-        el("th", { text: "Window" }),
-        el("th", { text: "Actions" }),
-      ),
-    ));
-    const tbody = el("tbody", null);
-
-    for (const row of rows) {
-      const state: LocalState = serving === row.codeFp ? "serving" : row.expiresAt > now ? "active" : "expired";
-      const chip = el("span", { class: "chip", text: state === "serving" ? "serving now" : state });
-      chip.className = `chip ${state === "serving" || state === "active" ? "active" : "expired"}`;
-      const actions = el("td", null);
-
-      if (state === "serving") {
-        const stop = el("button", { class: "btn danger small", type: "button", text: "Stop" });
-        stop.addEventListener("click", () => {
-          stopShare(row.codeFp);
-          announce("Stopped — every connection to that share is closed.");
-          refresh();
-        });
-        actions.append(stop, " ");
-      }
-
-      const extend = el("button", { class: "btn small", type: "button", text: "+24 h" });
-      extend.addEventListener("click", () => {
-        // Purely local: the sender's own device is the authority on the window, so no request
-        // has to leave this machine — and if the share is live right now, it follows along.
-        const expiresAt = Date.now() + Math.max(0, row.expiresAt - Date.now()) + 24 * 3600_000;
-        saveVaultRow({ ...row, expiresAt });
-        const live = extendShare(row.codeFp, 24);
-        announce(live ? "Extended by 24 hours (live share updated too)." : "Extended by 24 hours on this device.");
-        refresh();
-      });
-      actions.append(extend);
-
-      const qr = el("button", { class: "btn small", type: "button", text: "Key QR" });
-      qr.addEventListener("click", () => void showQr(row));
-      actions.append(" ", qr);
-
-      const del = el("button", { class: "btn danger small", type: "button", text: state === "serving" ? "Stop & forget" : "Forget" });
-      del.addEventListener("click", () => {
-        if (!stopShare(row.codeFp)) {
-          /* not being served from this tab */
-        }
-        deleteVaultRow(row.codeFp);
-        announce("Removed from this device. There is no remote copy to delete — the file never left this device.", true);
-        refresh();
-      });
-      actions.append(" ", del);
-
-      tbody.append(el("tr", null,
-        el("td", null, el("span", { class: "mono", text: row.shareId })),
-        el("td", null,
-          el("div", { text: row.name ?? "(unknown file)" }),
-          el("div", { class: "hint", text: row.size != null ? fmtBytes(row.size) : "" }),
+    if (!rows.length) {
+      wrap.append(el("div", { class: "card" },
+        el("div", { class: "empty" },
+          el("span", { class: "ico", text: "🗂️" }),
+          el("h2", { text: "Nothing here yet" }),
+          el("p", { class: "hint", text: "Start a transfer on the Send tab and it will appear here, with its key kept on this device." }),
         ),
-        el("td", null, chip),
-        el("td", { text: row.expiresAt > now ? fmtDurationLeft(row.expiresAt, now) : "closed" }),
-        actions,
       ));
+      return wrap;
     }
-
-    table.append(tbody);
-    list.append(table);
-    list.append(el("p", { class: "hint", text: "A share exists only while the sender's device serves it. Stopping closes every connection at once, and deleting the record here removes your copy of the key." }));
+    for (const row of rows) wrap.append(rowCard(row, serving));
+    return wrap;
   }
 
-  async function showQr(v: VaultRow): Promise<void> {
-    const modal = el("div", { class: "card", role: "dialog", "aria-label": `Key QR for ${v.shareId}` });
-    const payload = v.halfA && v.halfB
-      ? qrEncode({ kind: "split", shareId: v.shareId, halfAHex: v.halfA, halfBHex: v.halfB })
-      : qrEncode({ kind: "plain", shareId: v.shareId, keyHex: v.tkHex });
-    try {
-      modal.append(
-        el("h2", { text: `Transfer Key — ${v.shareId}` }),
-        el("p", { class: "hint", text: "This is the secret half. Send it over a different channel than the connection code." }),
-        await qrCard(payload, `streamdrop-${v.shareId}-key.png`, `Transfer key QR for ${v.shareId}`, 280),
-        el("button", { class: "btn small", type: "button", text: "Close", onclick: () => modal.remove() }),
-      );
-    } catch {
-      modal.append(
-        el("h2", { text: `Transfer Key — ${v.shareId}` }),
-        el("p", { class: "hint mono", text: v.tkHex }),
-        el("button", { class: "btn small", type: "button", text: "Close", onclick: () => modal.remove() }),
-      );
-    }
-    document.body.append(modal);
-    modal.scrollIntoView({ block: "nearest" });
+  function rowCard(row: VaultRow, serving: string | null): HTMLElement {
+    const now = Date.now();
+    const isServing = serving === row.codeFp;
+    const open = row.expiresAt > now;
+    const pill = isServing
+      ? el("span", { class: "pill ok" }, el("span", { class: "pulse" }), el("span", { text: "Serving now" }))
+      : open
+        ? el("span", { class: "pill warn", text: "Not being served" })
+        : el("span", { class: "pill", text: row.expiresAt ? "Window closed" : "Saved key" });
+
+    const actions = el("div", { class: "t-actions" });
+    const keyBtn = el("button", { class: "btn small", type: "button", text: "Show key" });
+    keyBtn.addEventListener("click", () => showKey(row));
+    actions.append(keyBtn);
+
+    const stop = el("button", { class: "btn danger small", type: "button", text: "Stop sharing" });
+    stop.addEventListener("click", () => {
+      stopShare(row.codeFp);
+      note("Stopped — every connection is closed.", "ok");
+      initDash(root);
+    });
+    const extend = el("button", { class: "btn small", type: "button", text: "+24 hours" });
+    extend.addEventListener("click", () => {
+      const next = extendShare(row.codeFp, 24);
+      if (next === null) {
+        note("This tab is not serving that transfer right now.", "err");
+        return;
+      }
+      note(`Open until ${new Date(next).toLocaleString()}.`, "ok");
+      initDash(root);
+    });
+    if (isServing) actions.append(extend, stop);
+
+    const forget = el("button", { class: "btn ghost small", type: "button", text: "Forget" });
+    forget.addEventListener("click", () => {
+      deleteVaultRow(row.codeFp);
+      toast("Forgotten on this device", "ok");
+      initDash(root);
+    });
+    actions.append(forget);
+
+    const when = isServing
+      ? `open for ${fmtDurationLeft(row.expiresAt)}`
+      : open
+        ? "Nothing is being served from this tab right now — start the file again on Send to share it."
+        : row.expiresAt
+          ? `Window closed ${new Date(row.expiresAt).toLocaleString()} — the key is still kept here.`
+          : "Key kept on this device.";
+
+    return el("div", { class: "t-item", style: "margin-top:10px" },
+      el("div", { class: "t-top" },
+        el("span", { class: "t-name", text: row.name ?? "Untitled transfer" }),
+        pill,
+      ),
+      el("div", { class: "t-top" },
+        el("span", { class: "t-id", text: row.shareId }),
+        el("span", {
+          class: "hint tiny",
+          text: [
+            row.size !== undefined ? fmtBytes(row.size) : null,
+            row.maxDownloads !== null && row.maxDownloads !== undefined
+              ? `${row.maxDownloads} download${row.maxDownloads === 1 ? "" : "s"}`
+              : "unlimited downloads",
+          ].filter(Boolean).join(" · "),
+        }),
+      ),
+      el("p", { class: "hint tiny", text: when }),
+      actions,
+    );
   }
+
+  function showKey(row: VaultRow): void {
+    const ac = new AbortController();
+    const backdrop = el("div", {
+      class: "modal-backdrop", role: "dialog", "aria-modal": "true",
+      "aria-label": `Key for transfer ${row.shareId}`,
+    });
+    const close = (): void => {
+      ac.abort();
+      backdrop.remove();
+    };
+    const qrHolder = el("div", { class: "qr-frame small" });
+    const body = el("div", { class: "card" },
+      el("div", { class: "spread" },
+        el("h2", { text: row.shareId }),
+        el("button", { class: "btn ghost small", type: "button", text: "Close" }),
+      ),
+      el("p", { class: "hint", text: row.halfA && row.halfB
+        ? "This transfer uses a split key: both halves are needed, so send them by two different routes."
+        : "This is the key that opens the file. Anyone who has it can decrypt a copy of the bytes." }),
+      qrHolder,
+    );
+    (body.querySelector("button") as HTMLElement).addEventListener("click", close);
+    backdrop.addEventListener("click", (e) => {
+      if (e.target === backdrop) close();
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") close();
+    }, { signal: ac.signal });
+
+    const payload = row.halfA && row.halfB
+      ? qrEncode({ kind: "split", shareId: row.shareId, halfAHex: row.halfA, halfBHex: row.halfB })
+      : qrEncode({ kind: "plain", shareId: row.shareId, keyHex: row.tkHex });
+
+    if (row.halfA && row.halfB) {
+      body.append(keyBlock("Half A", row.halfA), keyBlock("Half B", row.halfB));
+    } else {
+      body.append(keyBlock("Transfer Key", row.tkHex));
+    }
+
+    void qrDataUrl(payload, 420, "M").then((src) => {
+      qrHolder.append(el("div", { class: "qr-tile" }, el("img", { src, alt: `Key for transfer ${row.shareId}` })));
+    }).catch(() => {
+      qrHolder.append(el("p", { class: "hint tiny", text: "QR rendering unavailable — use the text above." }));
+    });
+
+    backdrop.append(body);
+    document.body.append(backdrop);
+    announce(`Key for transfer ${row.shareId} shown.`);
+  }
+
+  function keyBlock(title: string, value: string): HTMLElement {
+    const field = el("textarea", { class: "code-box mono", rows: "2", readOnly: true, spellcheck: "false", "aria-label": title });
+    field.value = value;
+    const copy = el("button", { class: "btn small", type: "button", text: `Copy ${title}` });
+    copy.addEventListener("click", () => void (async () => {
+      try {
+        await navigator.clipboard.writeText(value);
+        toast(`${title} copied`, "ok");
+      } catch {
+        note("Copying failed — select the text and copy it manually.", "err");
+      }
+    })());
+    return el("div", { class: "stack", style: "margin-top:10px" },
+      el("span", { class: "hint tiny", text: title }),
+      field,
+      copy,
+    );
+  }
+}
+
+function hero(): HTMLElement {
+  return el("div", { class: "hero" },
+    el("h1", null, "Your transfers. ", el("span", { class: "accent", text: "On this device only." })),
+    el("p", { text: "Every transfer started in this browser, with the key kept here so you can hand it out again." }),
+  );
 }
