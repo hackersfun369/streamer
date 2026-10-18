@@ -29,25 +29,30 @@ jobs:
       - name: Install Android SDK
         uses: android-actions/setup-android@v3
 
+      # Gradle refuses to download a platform whose licence is not accepted, and the licence prompt
+      # is interactive — this is the step that keeps a fresh runner from failing with
+      # "You have not accepted the license agreements". compileSdk 36 is not in the image.
+      - name: Accept Android SDK licences
+        run: yes | sdkmanager --licenses > /dev/null 2>&1 || true
+
       - name: Build web assets
         run: |
           npm ci
           npm run build
 
       - name: Normalise the mobile shell (self-contained — there is no server)
-        run: node scripts/apply-mobile-config.cjs
+        run: node scripts/apply-mobile-config.mjs
 
-      # The Capacitor config lives in mobile/, so the CLI has to run from there; the generated
-      # android/ project therefore lands in mobile/android/ (as .gitignore expects).
-      - name: Sync Capacitor (generates the native android/ project)
+      # The Capacitor config lives in mobile/ (which has its own package.json, because the CLI
+      # insists on running from a package root), so the generated android/ project lands there too.
+      - name: Generate the native android project
         working-directory: mobile
         run: |
-          npx cap add android
-          npx cap sync android
+          npx --no-install cap add android
+          npx --no-install cap sync android
 
       - name: Grant the camera permission QR scanning needs
-        working-directory: mobile
-        run: node ../scripts/patch-android-manifest.cjs
+        run: node scripts/patch-android-manifest.mjs
 
       - name: Build APK (release)
         working-directory: mobile/android
@@ -55,36 +60,68 @@ jobs:
           chmod +x gradlew
           ./gradlew assembleRelease --no-daemon
 
-      - name: Sign (optional — needs ANDROID_KEYSTORE_B64 etc.)
-        if: env.ANDROID_KEYSTORE_B64 != ''
+      # assembleRelease produces an UNSIGNED apk, and Android will not install an unsigned apk at
+      # all. So this step always signs: with the release keystore when the secrets exist, otherwise
+      # with a throwaway debug key, so that "Run workflow" alone yields an installable APK with no
+      # setup. Swap in the three ANDROID_KEYSTORE_* secrets before distributing it anywhere real.
+      - name: Sign the APK
         run: |
-          echo "${{ secrets.ANDROID_KEYSTORE_B64 }}" | base64 -d > keystore.jks
-          sudo apt-get update -qq && sudo apt-get install -y -qq apksigner >/dev/null 2>&1 || true
-          find mobile/android/app/build/outputs/apk/release -name '*.apk' | while read -r apk; do
-            apksigner sign \
-              --ks keystore.jks \
-              --ks-pass pass:"${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" \
-              --key-pass pass:"${{ secrets.ANDROID_KEY_ALIAS_PASSWORD }}" \
-              --out "${apk%.apk}-signed.apk" "$apk" || \
-              $ANDROID_HOME/build-tools/*/apksigner sign \
-                --ks keystore.jks \
-                --ks-pass pass:"${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" \
-                --key-pass pass:"${{ secrets.ANDROID_KEY_ALIAS_PASSWORD }}" \
-                --out "${apk%.apk}-signed.apk" "$apk"
+          set -euo pipefail
+          OUT_DIR=mobile/android/app/build/outputs/apk/release
+          if [ -n "${{ secrets.ANDROID_KEYSTORE_B64 }}" ]; then
+            echo "Signing with the release keystore from the repository secrets."
+            echo "${{ secrets.ANDROID_KEYSTORE_B64 }}" | base64 -d > release-keystore.jks
+            KS=release-keystore.jks
+            KS_PASS="${{ secrets.ANDROID_KEYSTORE_PASSWORD }}"
+            KEY_PASS="${{ secrets.ANDROID_KEY_ALIAS_PASSWORD }}"
+          else
+            echo "::warning::No ANDROID_KEYSTORE_B64 secret set — signing with a throwaway debug key."
+            echo "::warning::The APK installs fine, but it is not suitable for the Play Store and a"
+            echo "::warning::later keystore cannot update over it (Android checks the signature)."
+            keytool -genkeypair -keystore debug-keystore.jks -storetype JKS \
+              -storepass android -keypass android -alias androiddebugkey \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US" > /dev/null 2>&1
+            KS=debug-keystore.jks
+            KS_PASS=android
+            KEY_PASS=android
+          fi
+
+          # Work out which key to use rather than assuming an alias name.
+          ALIAS_NAME="$(keytool -list -keystore "$KS" -storepass "$KS_PASS" 2>/dev/null \
+            | awk -F, '/PrivateKeyEntry/ {print $1}' | head -1 | tr -d '[:space:]')"
+          echo "Signing key alias: ${ALIAS_NAME:-<default>}"
+          ALIAS_ARG=""
+          [ -n "$ALIAS_NAME" ] && ALIAS_ARG="-ks-key-alias $ALIAS_NAME"
+
+          APKSIGNER="$(ls -1 "$ANDROID_HOME"/build-tools/*/apksigner 2>/dev/null | tail -1 || true)"
+          if [ -z "$APKSIGNER" ]; then
+            echo "::error::apksigner was not found in \$ANDROID_HOME/build-tools"
+            exit 1
+          fi
+          echo "Using $APKSIGNER"
+
+          shopt -s nullglob
+          for apk in "$OUT_DIR"/*.apk; do
+            if [ "$(basename "$apk")" = "streamdrop.apk" ]; then
+              continue
+            fi
+            "$APKSIGNER" sign --ks "$KS" --ks-pass "pass:$KS_PASS" --key-pass "pass:$KEY_PASS" \
+              $ALIAS_ARG --out "$OUT_DIR/streamdrop.apk" "$apk"
             rm -f "$apk"
           done
-        env:
-          ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
-          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          ANDROID_KEY_ALIAS_PASSWORD: ${{ secrets.ANDROID_KEY_ALIAS_PASSWORD }}
 
-      - uses: actions/upload-artifact@v4
+          "$APKSIGNER" verify --print-certs "$OUT_DIR/streamdrop.apk" | head -3
+          ls -lh "$OUT_DIR"
+
+      - name: Upload the APK
+        uses: actions/upload-artifact@v4
         with:
           name: streamdrop-apk
-          path: mobile/android/app/build/outputs/apk/**/*.apk
+          path: mobile/android/app/build/outputs/apk/release/streamdrop.apk
 
       - name: Attach to GitHub release (tags only)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: mobile/android/app/build/outputs/apk/release/*.apk
+          files: mobile/android/app/build/outputs/apk/release/streamdrop.apk

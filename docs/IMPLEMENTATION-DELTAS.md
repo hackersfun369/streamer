@@ -254,8 +254,14 @@ There is no backend left to delete a dependency from.
 - **The APK is now genuinely self-contained**: `mobile/capacitor.config.json` no longer carries a
   `server.url`, so Capacitor serves the bundled `dist/` from `https://localhost` (a secure context,
   so `crypto.subtle`, the camera and the clipboard all work offline), and
-  `scripts/patch-android-manifest.cjs` adds the `CAMERA` permission QR scanning needs.
-  `scripts/apply-mobile-config.cjs` now *strips* any leftover server URL rather than injecting one.
+  `scripts/patch-android-manifest.mjs` adds the `CAMERA` permission QR scanning needs.
+  `scripts/apply-mobile-config.mjs` *strips* any leftover server URL rather than injecting one.
+  Three details only a real build surfaced: the helpers had ESM bodies in `.cjs` files (fatal under
+  `"type": "module"`); Capacitor 8 refuses to run unless the directory it runs from is a package
+  root, so `mobile/package.json` exists purely to satisfy that; and `assembleRelease` emits an
+  *unsigned* APK that Android will not install, so the workflow always signs — with the repository
+  keystore when `ANDROID_KEYSTORE_B64` is set, otherwise with a throwaway debug key, which keeps
+  "Run workflow" one-click.
 - **Crypto is still untouched.** `src/crypto.ts` was not modified in v5, so containers, keys and
   codes remain byte-identical to v3/v4 and a v3-era ciphertext file stays readable. `uploadSecret`
   survives in `SenderSet` as a vestigial derivation (Drive uploads were its only consumer) purely to

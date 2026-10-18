@@ -19,3 +19,11 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+
+      # The APK workflow leans on these two helpers. A syntax error in one of them is otherwise
+      # only discovered ten minutes into an APK build, so exercise them here too.
+      - name: Smoke-test the mobile helper scripts
+        run: |
+          node scripts/apply-mobile-config.mjs
+          node scripts/patch-android-manifest.mjs
+          git diff --exit-code -- mobile/capacitor.config.json

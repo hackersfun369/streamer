@@ -1,0 +1,11 @@
+{
+  "name": "streamdrop-mobile",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Native Android shell for StreamDrop. The APK bundles ../dist, so it needs no host and no server URL.",
+  "scripts": {
+    "add:android": "cap add android",
+    "sync:android": "cap sync android"
+  }
+}
