@@ -65,6 +65,27 @@ jobs:
           npx --no-install cap add android
           npx --no-install cap sync android
 
+      # The Capacitor template hard-codes versionName "1.0", so the APK would claim 1.0 forever.
+      # Stamp it from the tag (vX.Y.Z), or — on workflow_dispatch — from package.json. The version
+      # code is monotonic: major*10000 + minor*100 + patch.
+      - name: Stamp the version on the native project
+        run: |
+          set -euo pipefail
+          GRADLE=mobile/android/app/build.gradle
+          VERSION="$(node -p "require('./package.json').version")"
+          if [ "${GITHUB_REF_TYPE:-branch}" = "tag" ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          case "$VERSION" in
+            *[0-9].*[0-9]*.[0-9]*) ;;
+            *) echo "::error::Cannot derive a valid APK version from '$VERSION'"; exit 1 ;;
+          esac
+          MAJOR="${VERSION%%.*}"; REST="${VERSION#*.}"; MINOR="${REST%%.*}"; PATCH="${REST#*.}"
+          VERSION_CODE=$((MAJOR * 10000 + MINOR * 100 + PATCH))
+          sed -i -E "s/^(\s*)versionCode\s+[0-9]+\s*$/\1versionCode $VERSION_CODE/; s/^(\s*)versionName\s+\"[^\"]*\"\s*$/\1versionName \"$VERSION\"/" "$GRADLE"
+          echo "APK identity: versionName $VERSION · versionCode $VERSION_CODE"
+          grep -nE "version(Name|Code)" "$GRADLE"
+
       - name: Grant the camera permission QR scanning needs
         run: node scripts/patch-android-manifest.mjs
 
@@ -151,6 +172,9 @@ jobs:
             - Needs Android 7.0 or newer (minSdk 24).
             - Your phone will warn you about installing an unknown app — allow it for whatever
               app you downloaded with (Chrome, Files), then open the APK again.
+            - One code does everything: the key travels inside the connection code, so the
+              receiver scans twice and types nothing. Prefer the stricter two-channel flow?
+              Options → "keep the key out of the code".
             - The app needs no account, no server and no network identity: two phones exchange a
               connection code, and the file travels straight between them.
 
