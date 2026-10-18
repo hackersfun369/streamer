@@ -1,0 +1,14 @@
+# dependencies / build
+node_modules/
+dist/
+.wrangler/
+.dev.vars
+
+# capacitor native project is generated in CI only
+mobile/android/
+mobile/ios/
+
+# misc
+.DS_Store
+*.log
+tmp/

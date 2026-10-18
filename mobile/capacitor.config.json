@@ -1,0 +1,17 @@
+{
+  "appId": "com.streamdrop.app",
+  "appName": "StreamDrop",
+  "webDir": "../dist",
+  "server": {
+    "androidScheme": "https"
+  },
+  "android": {
+    "allowMixedContent": false
+  },
+  "plugins": {
+    "SplashScreen": {
+      "backgroundColor": "#0f1022",
+      "showSplashScreenSpinner": false
+    }
+  }
+}

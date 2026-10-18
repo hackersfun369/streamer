@@ -1,0 +1,90 @@
+name: Build APK
+
+# The APK is entirely self-contained: it bundles dist/ and serves it from https://localhost, so
+# there is no host, no URL and no secret to point it at. Everything happens on the runner.
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Install Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Build web assets
+        run: |
+          npm ci
+          npm run build
+
+      - name: Normalise the mobile shell (self-contained — there is no server)
+        run: node scripts/apply-mobile-config.cjs
+
+      # The Capacitor config lives in mobile/, so the CLI has to run from there; the generated
+      # android/ project therefore lands in mobile/android/ (as .gitignore expects).
+      - name: Sync Capacitor (generates the native android/ project)
+        working-directory: mobile
+        run: |
+          npx cap add android
+          npx cap sync android
+
+      - name: Grant the camera permission QR scanning needs
+        working-directory: mobile
+        run: node ../scripts/patch-android-manifest.cjs
+
+      - name: Build APK (release)
+        working-directory: mobile/android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon
+
+      - name: Sign (optional — needs ANDROID_KEYSTORE_B64 etc.)
+        if: env.ANDROID_KEYSTORE_B64 != ''
+        run: |
+          echo "${{ secrets.ANDROID_KEYSTORE_B64 }}" | base64 -d > keystore.jks
+          sudo apt-get update -qq && sudo apt-get install -y -qq apksigner >/dev/null 2>&1 || true
+          find mobile/android/app/build/outputs/apk/release -name '*.apk' | while read -r apk; do
+            apksigner sign \
+              --ks keystore.jks \
+              --ks-pass pass:"${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" \
+              --key-pass pass:"${{ secrets.ANDROID_KEY_ALIAS_PASSWORD }}" \
+              --out "${apk%.apk}-signed.apk" "$apk" || \
+              $ANDROID_HOME/build-tools/*/apksigner sign \
+                --ks keystore.jks \
+                --ks-pass pass:"${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" \
+                --key-pass pass:"${{ secrets.ANDROID_KEY_ALIAS_PASSWORD }}" \
+                --out "${apk%.apk}-signed.apk" "$apk"
+            rm -f "$apk"
+          done
+        env:
+          ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS_PASSWORD: ${{ secrets.ANDROID_KEY_ALIAS_PASSWORD }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: streamdrop-apk
+          path: mobile/android/app/build/outputs/apk/**/*.apk
+
+      - name: Attach to GitHub release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: mobile/android/app/build/outputs/apk/release/*.apk

@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>StreamDrop — logo preview</title>
+<style>
+  :root { --bg:#0f1022; --surface:#191b30; --border:#3a3f66; --text:#eceefc; --muted:#a4a8c7; }
+  * { box-sizing: border-box; }
+  body {
+    margin:0; padding:40px; background:var(--bg); color:var(--text);
+    font-family:'Segoe UI Variable Text','Segoe UI',Inter,system-ui,-apple-system,sans-serif;
+  }
+  h1 { font-size:14px; letter-spacing:.16em; text-transform:uppercase; color:var(--muted); font-weight:600; margin:0 0 22px; }
+  h2 { font-size:12px; letter-spacing:.14em; text-transform:uppercase; color:var(--muted); font-weight:600; margin:0 0 16px; }
+  section {
+    background:var(--surface); border:1px solid var(--border); border-radius:16px;
+    padding:28px; margin-bottom:22px;
+  }
+  .lockup { width:352px; max-width:100%; }
+  .row { display:flex; align-items:center; gap:36px; flex-wrap:wrap; }
+  .sizes { display:flex; align-items:flex-end; gap:28px; }
+  .sizes figure { margin:0; text-align:center; }
+  .sizes img { display:block; margin:0 auto 8px; }
+  .sizes span { font-size:11px; color:var(--muted); }
+  /* real header usage from index.html */
+  .appbar {
+    display:flex; align-items:center; gap:10px; padding:12px 18px;
+    background:#0f1022; border:1px solid var(--border); border-radius:12px; width:fit-content;
+  }
+  .appbar strong { font-size:15px; letter-spacing:-.2px; }
+  .light { background:#f4f5fc; border-color:#c3c8ea; }
+  .light h2 { color:#565d84; }
+  .light .note { color:#565d84; }
+  .light .chip { background:#0f1022; display:inline-flex; padding:14px 20px; border-radius:12px; }
+  .note { font-size:12px; color:var(--muted); margin:14px 0 0; }
+  .swatches { display:flex; gap:0; border-radius:10px; overflow:hidden; border:1px solid var(--border); width:fit-content; }
+  .swatches div { width:92px; padding:14px 10px; text-align:center; font-size:10px; font-weight:600; }
+</style>
+</head>
+<body>
+
+<h1>StreamDrop — logo</h1>
+
+<section>
+  <h2>Primary lockup</h2>
+  <img class="lockup" src="../public/logo.svg" alt="StreamDrop" />
+</section>
+
+<section>
+  <h2>App icon / favicon</h2>
+  <div class="sizes">
+    <figure><img src="../public/icon.svg" width="128" height="128" alt="" /><span>128 px</span></figure>
+    <figure><img src="../public/icon.svg" width="64" height="64" alt="" /><span>64 px</span></figure>
+    <figure><img src="../public/icon.svg" width="32" height="32" alt="" /><span>32 px</span></figure>
+    <figure><img src="../public/icon.svg" width="16" height="16" alt="" /><span>16 px</span></figure>
+  </div>
+</section>
+
+<section>
+  <h2>Mark on transparent</h2>
+  <div class="row">
+    <img src="../public/logo-mark.svg" width="96" height="96" alt="" />
+    <img src="../public/logo-mark.svg" width="48" height="48" alt="" />
+    <img src="../public/logo-mark.svg" width="24" height="24" alt="" />
+  </div>
+</section>
+
+<section>
+  <h2>In the app header</h2>
+  <div class="appbar">
+    <img src="../public/icon.svg" width="28" height="28" alt="" />
+    <strong>StreamDrop</strong>
+  </div>
+</section>
+
+<section class="light">
+  <h2>On a light surface</h2>
+  <div class="row">
+    <span class="chip"><img src="../public/logo.svg" width="264" height="72" alt="StreamDrop" /></span>
+    <img src="../public/logo-mark.svg" width="72" height="72" alt="" style="background:#0f1022;border-radius:18px" />
+  </div>
+  <p class="note">White + gray needs a dark backing. The mark sits on its own dark tile so it survives light-threaded UIs.</p>
+</section>
+
+<section>
+  <h2>Palette</h2>
+  <div class="swatches">
+    <div style="background:#ffffff;color:#0f1022">#FFFFFF</div>
+    <div style="background:#c8ccd4;color:#0f1022">#C8CCD4</div>
+    <div style="background:#9aa0aa;color:#0f1022">#9AA0AA</div>
+    <div style="background:#878d98;color:#fff">#878D98</div>
+    <div style="background:#0f1022;color:#fff">#0F1022</div>
+  </div>
+</section>
+
+</body>
+</html>

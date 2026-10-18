@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="StreamDrop">
+  <title>StreamDrop</title>
+  <defs>
+    <linearGradient id="sdIcoTile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1c1f27"/>
+      <stop offset="1" stop-color="#0a0b0f"/>
+    </linearGradient>
+    <linearGradient id="sdIcoFg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#9aa0aa"/>
+    </linearGradient>
+    <mask id="sdIcoCut" maskUnits="userSpaceOnUse" x="0" y="0" width="64" height="64">
+      <rect width="64" height="64" fill="#000000"/>
+      <path d="M32 9C32 9 48 26.5 48 38A16 16 0 0 1 16 38C16 26.5 32 9 32 9Z" fill="#ffffff"/>
+      <rect x="29.4" y="26" width="5.2" height="12.5" rx="2.6" fill="#000000"/>
+      <path d="M24 37H40L32 46.5Z" fill="#000000" stroke="#000000" stroke-width="3" stroke-linejoin="round"/>
+    </mask>
+  </defs>
+
+  <rect width="64" height="64" rx="15" fill="url(#sdIcoTile)"/>
+  <rect x="0.75" y="0.75" width="62.5" height="62.5" rx="14.25" fill="none"
+        stroke="#ffffff" stroke-opacity="0.12" stroke-width="1.5"/>
+  <rect width="64" height="64" fill="url(#sdIcoFg)" mask="url(#sdIcoCut)"/>
+</svg>

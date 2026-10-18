@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="color-scheme" content="dark light" />
+  <meta name="description" content="StreamDrop — key-based, end-to-end encrypted file transfer with no server at all. The file stays on the sender's device and streams device to device; the key is the only thing that opens it." />
+  <title>StreamDrop — encrypted file drop</title>
+  <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+</head>
+<body>
+  <a class="skip-link" href="#screen">Skip to content</a>
+
+  <header class="topbar">
+    <div class="brand">
+      <img src="/icon.svg" alt="" width="28" height="28" aria-hidden="true" />
+      <strong>StreamDrop</strong>
+    </div>
+    <nav class="tabs" role="tablist" aria-label="Main">
+      <a role="tab" id="tab-send" href="#/send" aria-selected="true">Send</a>
+      <a role="tab" id="tab-receive" href="#/receive" aria-selected="false">Receive</a>
+      <a role="tab" id="tab-dash" href="#/dash" aria-selected="false">My transfers</a>
+    </nav>
+  </header>
+
+  <main id="screen" tabindex="-1">
+    <section id="screen-send" class="screen" aria-labelledby="tab-send"></section>
+    <section id="screen-receive" class="screen" hidden aria-labelledby="tab-receive"></section>
+    <section id="screen-dash" class="screen" hidden aria-labelledby="tab-dash"></section>
+  </main>
+
+  <footer class="foot">
+    <span class="hint">No accounts · no server · no cloud storage · keys never leave the browser · files stream device to device</span>
+  </footer>
+
+  <div id="toast-region">
+    <div id="aria-polite" role="status" aria-live="polite" class="visually-hidden"></div>
+    <div id="aria-assertive" role="alert" aria-live="assertive" class="visually-hidden"></div>
+    <div id="toast" class="toast" hidden></div>
+  </div>
+
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>
