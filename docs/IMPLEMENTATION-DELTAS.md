@@ -256,12 +256,16 @@ There is no backend left to delete a dependency from.
   so `crypto.subtle`, the camera and the clipboard all work offline), and
   `scripts/patch-android-manifest.mjs` adds the `CAMERA` permission QR scanning needs.
   `scripts/apply-mobile-config.mjs` *strips* any leftover server URL rather than injecting one.
-  Three details only a real build surfaced: the helpers had ESM bodies in `.cjs` files (fatal under
+  Four details only a real build surfaced: the helpers had ESM bodies in `.cjs` files (fatal under
   `"type": "module"`); Capacitor 8 refuses to run unless the directory it runs from is a package
-  root, so `mobile/package.json` exists purely to satisfy that; and `assembleRelease` emits an
-  *unsigned* APK that Android will not install, so the workflow always signs — with the repository
-  keystore when `ANDROID_KEYSTORE_B64` is set, otherwise with a throwaway debug key, which keeps
-  "Run workflow" one-click.
+  root, so `mobile/package.json` exists purely to satisfy that; `android-actions/setup-android@v3`
+  had to be dropped, because it aborts with "Failed to find package 'tools'" while installing a
+  package Google removed from the SDK repository years ago — the `ubuntu-latest` image already
+  ships `ANDROID_HOME` with platform `android-36`, build-tools 36 and platform-tools, which is
+  everything `compileSdk 36` needs; and `assembleRelease` emits an *unsigned* APK that Android will
+  not install, so the workflow always signs — with the repository keystore when
+  `ANDROID_KEYSTORE_B64` is set, otherwise with a throwaway debug key, which keeps "Run workflow"
+  one-click.
 - **Crypto is still untouched.** `src/crypto.ts` was not modified in v5, so containers, keys and
   codes remain byte-identical to v3/v4 and a v3-era ciphertext file stays readable. `uploadSecret`
   survives in `SenderSet` as a vestigial derivation (Drive uploads were its only consumer) purely to
